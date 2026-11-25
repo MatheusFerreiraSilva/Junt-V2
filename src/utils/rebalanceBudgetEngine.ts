@@ -29,6 +29,19 @@ import {
   selectPlannedNetIncome,
   upgradeBudgetPlanContract,
 } from './domainSelectors';
+import {
+  DEFAULT_HOUSEHOLD_CONFIG,
+  evaluateWaterfall,
+  type WaterfallEvaluationInput,
+  type WaterfallEvaluationResult,
+} from '../domain/waterfallEngine';
+import {
+  calculateShieldMetrics,
+  routeMonthlyInvestments,
+  type RouteInvestmentsResult,
+  type ShieldMetricsResult,
+} from '../domain/shieldEngine';
+import type { Goal } from '../types/finance';
 
 export { selectEffectiveBudgetPlanForCompetence };
 
@@ -169,9 +182,11 @@ const NEUTRAL_POLICY_FALLBACK_WEIGHTS: Record<DestinationKey, number> = {
 export function proposeCustomInvestmentRatio(
   targetInvestPct: number,
   currentGroupRatios: { fixedPct: number; varPct: number; investPct: number } = {
-    fixedPct: 60,
-    varPct: 30,
-    investPct: 10,
+    fixedPct: Math.round(DEFAULT_HOUSEHOLD_CONFIG.structureCapRate * 100),
+    varPct: Math.round(
+      (1 - DEFAULT_HOUSEHOLD_CONFIG.structureCapRate - DEFAULT_HOUSEHOLD_CONFIG.mandatoryGoalRate) * 100
+    ),
+    investPct: Math.round(DEFAULT_HOUSEHOLD_CONFIG.mandatoryGoalRate * 100),
   }
 ): {
   isCustomPolicy: boolean;
@@ -1824,5 +1839,61 @@ export function buildBudgetApplicationCommand(
     nextState,
     appliedMonths,
     skippedApprovedMonths,
+  };
+}
+
+/**
+ * Delegação canônica v2.3 de redistribuição e roteamento de sobras para waterfallEngine + shieldEngine.
+ * // TODO(Etapa 4-5): Migrar UI de BudgetRebalanceModal para consumir este motor v2.3 diretamente
+ */
+export function evaluateBudgetWaterfallAndSurplusV23(params: {
+  waterfallInput: WaterfallEvaluationInput;
+  currentShieldBalance: number;
+  goals: Goal[];
+  investClosingSurplus?: boolean;
+}): {
+  waterfall: WaterfallEvaluationResult;
+  shield: ShieldMetricsResult;
+  investmentRouting: RouteInvestmentsResult;
+} {
+  const waterfall = evaluateWaterfall(params.waterfallInput);
+  const shield = calculateShieldMetrics({
+    cycles: [
+      {
+        housingTotal: waterfall.guards.structure.housingTotal,
+        essentialFixedTotal: waterfall.guards.structure.essentialFixedTotal,
+        cancelableFixedTotal: waterfall.guards.structure.cancelableFixedTotal,
+        installmentsTotal: waterfall.guards.structure.installmentsTotal,
+        groceriesAmount: waterfall.guards.structure.groceriesAmount,
+        routineAmount: waterfall.guards.structure.routineAmount,
+        bufferAmount: waterfall.guards.structure.bufferAmount,
+      },
+    ],
+    currentShieldBalance: params.currentShieldBalance,
+    shieldFloorMonths: waterfall.config.shieldFloorMonths,
+    shieldTargetMonths: waterfall.config.shieldTargetMonths,
+  });
+
+  const optionalSurplusToInvest = params.investClosingSurplus
+    ? Math.max(0, waterfall.closingLedgers.closingSurplus)
+    : 0;
+  const partnerAllowanceSweeps = roundMoney(
+    waterfall.closingLedgers.walletA.sweptToSharedGoals +
+      waterfall.closingLedgers.walletB.sweptToSharedGoals
+  );
+
+  const investmentRouting = routeMonthlyInvestments({
+    mandatoryGoalAmount: waterfall.mandatoryGoal.mandatoryGoalAmount,
+    optionalSurplusToInvest,
+    partnerAllowanceSweeps,
+    goals: params.goals,
+    shieldMetrics: shield,
+    goalAllocationRules: waterfall.config.goalAllocationRules,
+  });
+
+  return {
+    waterfall,
+    shield,
+    investmentRouting,
   };
 }

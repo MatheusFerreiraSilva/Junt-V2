@@ -1,5 +1,11 @@
-import { ExpenseItem, CategoryKey } from '../types/finance';
-import { CATEGORIES_BASE } from '../context/FinanceContext';
+import { BoostTransfer, CategoryKey, ExpenseItem, SurplusRouting } from '../types/finance';
+import {
+  calculateClosingLedgers,
+  roundMoney,
+  type ClosingLedgersResult,
+  type PartnerWalletInput,
+} from '../domain/waterfallEngine';
+import { CATEGORY_PRESENTATION_META } from './occurrenceProjection';
 
 export interface DuplicateGroup {
   id: string;
@@ -10,7 +16,45 @@ export interface DuplicateGroup {
   date: string;
 }
 
-// TODO(Etapa 2): Regras de reconciliação v2.3 sob Caixa Único (CoupleSettlementSummary removido)
+export interface SinglePoolReconciliationInput {
+  totalAvailableCash: number;
+  mandatoryGoalAmount: number;
+  actualStructureTotal: number;
+  unlockedAllowanceA: number;
+  unlockedAllowanceB: number;
+  previousMonthCarryOver?: number;
+  safeAllowancePool?: number;
+  allowanceFloor?: number;
+  sharedAllowanceExpensesTotal?: number;
+  boostTransfers?: BoostTransfer[];
+  partnerA?: PartnerWalletInput;
+  partnerB?: PartnerWalletInput;
+  surplusRouting?: SurplusRouting;
+}
+
+export interface SinglePoolReconciliationResult extends ClosingLedgersResult {
+  /**
+   * No modelo Caixa Único + Mesada Híbrida v2.3 não existe dívida nem acerto 50/50 entre parceiros.
+   */
+  partnerDebtBalance: 0;
+  settlementRequired: false;
+}
+
+/**
+ * Reconciliação canônica v2.3 sob Caixa Único + Mesada Híbrida (`Só Minha` vs `Dos Dois`).
+ * Substitui integralmente o antigo cálculo de rateio/dívida entre parceiros.
+ */
+export function reconcileSinglePoolV23(
+  input: SinglePoolReconciliationInput
+): SinglePoolReconciliationResult {
+  const ledgers = calculateClosingLedgers(input);
+  return {
+    ...ledgers,
+    closingSurplus: roundMoney(ledgers.closingSurplus),
+    partnerDebtBalance: 0,
+    settlementRequired: false,
+  };
+}
 
 export interface PredictiveBurnAlert {
   categoryKey: CategoryKey;
@@ -55,13 +99,10 @@ export function detectDuplicateExpenses(expenses: ExpenseItem[]): DuplicateGroup
       const descB = b.description.trim().toLowerCase();
       const sameDesc = descA === descB;
 
-      // Date difference in days
       const dateDiffDays = Math.abs(
         (new Date(a.date).getTime() - new Date(b.date).getTime()) / (1000 * 60 * 60 * 24)
       );
 
-      // Match criteria 1: Same date, exact amount, and same category
-      // Match criteria 2: Within 1 day, exact amount, and same description
       if ((sameDate && sameAmount && sameCategory) || (dateDiffDays <= 1 && sameAmount && sameDesc)) {
         matchedDuplicates.push(b);
         processedIds.add(b.id);
@@ -87,8 +128,6 @@ export function detectDuplicateExpenses(expenses: ExpenseItem[]): DuplicateGroup
   return groups;
 }
 
-// TODO(Etapa 2): Regras de reconciliação v2.3 sob Caixa Único (calculateCoupleSettlement removido)
-
 /**
  * Calculates predictive burn rate and projections for categories before they burst.
  */
@@ -104,13 +143,11 @@ export function calculatePredictiveBurnRates({
 }): PredictiveBurnAlert[] {
   const alerts: PredictiveBurnAlert[] = [];
 
-  // Determine days passed and total days in current month
   const now = new Date();
   const year = parseInt(currentMonth.split('-')[0], 10);
   const month = parseInt(currentMonth.split('-')[1], 10);
   const totalDaysInMonth = new Date(year, month, 0).getDate();
 
-  // If viewing current calendar month, use real today date; else assume 30 days
   const isCurrentMonth =
     now.getFullYear() === year && now.getMonth() + 1 === month;
   const currentDay = isCurrentMonth ? Math.max(1, now.getDate()) : 15;
@@ -120,7 +157,7 @@ export function calculatePredictiveBurnRates({
     const spend = categoriesSpending[catKey];
     if (!spend || spend.budget <= 0) return;
 
-    const catBase = CATEGORIES_BASE[catKey];
+    const catMeta = CATEGORY_PRESENTATION_META[catKey];
     const burnRatePerDay = currentDay > 0 ? spend.spent / currentDay : 0;
     const safeDailyTarget =
       daysRemaining > 0 && spend.remaining > 0 ? spend.remaining / daysRemaining : 0;
@@ -134,7 +171,6 @@ export function calculatePredictiveBurnRates({
       severity = 'critical';
       recommendation = `Categoria já ultrapassou o teto em R$ ${Math.abs(spend.remaining).toFixed(2)}.`;
     } else if (burnRatePerDay > 0) {
-      // Days needed at current burn rate to reach budget limit
       const daysToExhaustBudget = spend.budget / burnRatePerDay;
       projectedBurstDay = Math.ceil(daysToExhaustBudget);
 
@@ -152,8 +188,8 @@ export function calculatePredictiveBurnRates({
     if (severity !== 'nominal') {
       alerts.push({
         categoryKey: catKey,
-        categoryName: catBase?.name || catKey,
-        categoryEmoji: catBase?.emoji || '💳',
+        categoryName: catMeta?.label || catKey,
+        categoryEmoji: catMeta?.emoji || '💳',
         spent: spend.spent,
         budget: spend.budget,
         percentUsed: spend.percentageUsed,
@@ -167,10 +203,10 @@ export function calculatePredictiveBurnRates({
     }
   });
 
-  // Sort by most critical first
   return alerts.sort((a, b) => {
     if (a.severity === 'critical' && b.severity !== 'critical') return -1;
     if (b.severity === 'critical' && a.severity !== 'critical') return 1;
     return (a.daysUntilBurst || 99) - (b.daysUntilBurst || 99);
   });
 }
+

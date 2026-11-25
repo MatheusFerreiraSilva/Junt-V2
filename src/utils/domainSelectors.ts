@@ -50,6 +50,14 @@ import {
   toSafeCents,
   type ResolvedSliceNature,
 } from './occurrenceProjection';
+import {
+  calculateShieldMetrics,
+  routeMonthlyInvestments,
+  type RouteInvestmentsResult,
+  type ShieldMetricsResult,
+} from '../domain/shieldEngine';
+import { DEFAULT_HOUSEHOLD_CONFIG } from '../domain/waterfallEngine';
+import type { Goal, GoalAllocationRule } from '../types/finance';
 
 export { roundMoney };
 
@@ -119,7 +127,6 @@ export type FinancialEventType =
   | 'ECONOMIC_INCOME'        // Receita líquida recebida (salário, bolsa, plantão)
   | 'RESERVE_APORTE'         // Transferência para reserva/cofrinho (reduz caixa operacional, eleva patrimônio)
   | 'RESERVE_RESGATE'         // Resgate da reserva/cofrinho (eleva caixa operacional, reduz patrimônio)
-  | 'COUPLE_SETTLEMENT'      // Acerto financeiro entre parceiros (transferência interna P1 <-> P2)
   | 'OBLIGATION_FORECAST'    // Previsão/Obrigação futura (conta fixa pendente, parcela vincenda)
   | 'RECEIVABLE_FORECAST';   // Recebível futuro (plantão realizado/agendado aguardando pagamento)
 
@@ -702,25 +709,101 @@ export function selectAnnualYield(state: AppState): number {
 }
 
 /**
-  * Selects emergency reserve metrics (Block 1).
-  */
+ * Selects emergency reserve metrics (Escudo C.1) delegating to shieldEngine.
+ * // TODO(Etapa 4-5): Migrar UI para consumir ShieldMetricsResult diretamente
+ */
 export function selectEmergencyReserveMetrics(state: AppState, monthlyExpenses: number) {
   const currentAmount = state.protectionCurrentAmount || 0;
   const totalInvested = state.protectionTotalInvested ?? currentAmount;
   const yieldAccumulated = state.protectionYieldAccumulated ?? (currentAmount - totalInvested);
-  const targetMonths = state.profile?.emergencyReserveMonthsTarget ?? 6;
-  const targetAmount = roundMoney(monthlyExpenses * targetMonths);
-  const monthsCovered = monthlyExpenses > 0 ? Number((currentAmount / monthlyExpenses).toFixed(1)) : 0;
+  const targetMonths = state.profile?.emergencyReserveMonthsTarget ?? DEFAULT_HOUSEHOLD_CONFIG.shieldTargetMonths;
+
+  const shieldMetrics: ShieldMetricsResult = calculateShieldMetrics({
+    cycles: [
+      {
+        housingTotal: monthlyExpenses,
+        essentialFixedTotal: 0,
+        installmentsTotal: 0,
+      },
+    ],
+    currentShieldBalance: currentAmount,
+    shieldFloorMonths: DEFAULT_HOUSEHOLD_CONFIG.shieldFloorMonths,
+    shieldTargetMonths: targetMonths,
+  });
 
   return {
     currentAmount: roundMoney(currentAmount),
     totalInvested: roundMoney(totalInvested),
     yieldAccumulated: roundMoney(yieldAccumulated),
     targetMonths,
-    targetAmount,
-    monthsCovered,
-    isComplete: currentAmount >= targetAmount && targetAmount > 0,
+    targetAmount: shieldMetrics.shieldTargetAmount,
+    monthsCovered: shieldMetrics.currentCoverageMonths,
+    isComplete: shieldMetrics.isTankFull,
+    shieldFloorAmount: shieldMetrics.shieldFloorAmount,
+    usableFatAmount: shieldMetrics.usableFatAmount,
+    isTankFull: shieldMetrics.isTankFull,
   };
+}
+
+export function selectShieldAndInvestmentRoutingV23(
+  state: AppState,
+  monthlyEssentialCost: number,
+  mandatoryGoalAmount: number,
+  optionalSurplusToInvest = 0,
+  goalAllocationRules: GoalAllocationRule[] = []
+): { shield: ShieldMetricsResult; routing: RouteInvestmentsResult } {
+  const shield = calculateShieldMetrics({
+    cycles: [
+      {
+        housingTotal: monthlyEssentialCost,
+        essentialFixedTotal: 0,
+        installmentsTotal: 0,
+      },
+    ],
+    currentShieldBalance: state.protectionCurrentAmount || 0,
+    shieldFloorMonths: DEFAULT_HOUSEHOLD_CONFIG.shieldFloorMonths,
+    shieldTargetMonths:
+      state.profile?.emergencyReserveMonthsTarget ?? DEFAULT_HOUSEHOLD_CONFIG.shieldTargetMonths,
+  });
+
+  const goals: Goal[] = [
+    {
+      id: 'shield-main',
+      title: 'Escudo de Emergência',
+      pillar: 'shield',
+      targetAmount: shield.shieldTargetAmount,
+      currentAmount: state.protectionCurrentAmount || 0,
+      autoAllocateWeight: 50,
+    },
+    ...(state.piggyBanks || [])
+      .filter((pb) => !pb.isDeleted && !pb.archived)
+      .map<Goal>((pb) => ({
+        id: pb.id,
+        title: pb.name,
+        pillar: pb.isFireEligible ? 'wealth' : 'dreams',
+        targetAmount: pb.targetAmount,
+        currentAmount: pb.currentAmount,
+        autoAllocateWeight: 30,
+      })),
+    {
+      id: 'wealth-main',
+      title: 'Patrimônio / Liberdade',
+      pillar: 'wealth',
+      targetAmount: Math.max(100000, monthlyEssentialCost * 300),
+      currentAmount: (state.freedomTotalInvested || 0) + (state.freedomYieldAccumulated || 0),
+      autoAllocateWeight: 20,
+    },
+  ];
+
+  const routing = routeMonthlyInvestments({
+    mandatoryGoalAmount,
+    optionalSurplusToInvest,
+    goals,
+    shieldMetrics: shield,
+    goalAllocationRules,
+  });
+
+  return { shield, routing };
 }
 
 /**

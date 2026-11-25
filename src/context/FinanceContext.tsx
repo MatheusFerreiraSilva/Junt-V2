@@ -192,6 +192,7 @@ import {
   type BuildBudgetApplicationCommandResult,
   type RebalanceResult,
 } from '../utils/rebalanceBudgetEngine';
+import { calculateShieldMetrics } from '../domain/shieldEngine';
 
 export const CATEGORIES_BASE: Record<CategoryKey, { name: string; emoji: string; description: string; colorHex: string; bgLight: string; borderHex: string }> = {
   moradia: {
@@ -2471,20 +2472,30 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
     return moradiaBudget + transporteBudget + comidaBudget + protecaoBudget;
   }, [totalIncome, activeLifeTier, displayedState.categoryPercentages]);
 
-  const autoCalculatedProtectionTarget = useMemo(() => {
-    const targetMonths = state.profile.emergencyReserveMonthsTarget ?? 6;
-    return monthlyFixedExpensesAvg * targetMonths;
-  }, [monthlyFixedExpensesAvg, state.profile.emergencyReserveMonthsTarget]);
+  // TODO(Etapa 4-5): Migrar UI para consumir shieldEngine diretamente (piso 4 meses / teto 10 meses)
+  const shieldMetricsV23 = useMemo(() => {
+    const targetMonths = state.profile.emergencyReserveMonthsTarget ?? 10;
+    return calculateShieldMetrics({
+      cycles: [
+        {
+          housingTotal: monthlyFixedExpensesAvg,
+          essentialFixedTotal: 0,
+          installmentsTotal: 0,
+        },
+      ],
+      currentShieldBalance: state.protectionCurrentAmount || 0,
+      shieldFloorMonths: 4,
+      shieldTargetMonths: targetMonths,
+    });
+  }, [monthlyFixedExpensesAvg, state.protectionCurrentAmount, state.profile.emergencyReserveMonthsTarget]);
 
-  // Piso Intocável de Segurança (3 meses de custos fixos essenciais estritamente blindados)
-  const emergencyReserveFloorAmount = useMemo(() => {
-    return monthlyFixedExpensesAvg * 3;
-  }, [monthlyFixedExpensesAvg]);
+  const autoCalculatedProtectionTarget = shieldMetricsV23.shieldTargetAmount;
+
+  // Piso Intocável de Segurança (4 meses de custos essenciais reais via shieldEngine)
+  const emergencyReserveFloorAmount = shieldMetricsV23.shieldFloorAmount;
 
   // Excesso Alavancável para Objetivos ou Compras Estratégicas à Vista (saldo acima do piso)
-  const emergencyReserveExcessAmount = useMemo(() => {
-    return Math.max(0, state.protectionCurrentAmount - emergencyReserveFloorAmount);
-  }, [state.protectionCurrentAmount, emergencyReserveFloorAmount]);
+  const emergencyReserveExcessAmount = shieldMetricsV23.usableFatAmount;
 
   // Historical 6 Months Trends
   const historicalTrends: MonthTrendRecord[] = useMemo(() => {

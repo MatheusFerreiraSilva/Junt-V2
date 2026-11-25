@@ -22,6 +22,11 @@ import {
   selectEffectiveBudgetPlanForCompetence,
   selectVerifiableCashSummary,
 } from './domainSelectors';
+import {
+  calculateMandatoryGoalAllocation,
+  evaluateWaterfall,
+  type WaterfallEvaluationResult,
+} from '../domain/waterfallEngine';
 
 export { roundMoney };
 
@@ -153,6 +158,9 @@ export interface ThermometerEngineResult {
     marginDelta: number;
     lastCheckedAt?: string;
   };
+
+  // Delegação canônica v2.3 ao motor puro da cascata
+  waterfallV23?: WaterfallEvaluationResult;
 }
 
 /**
@@ -227,7 +235,10 @@ export function calculateThermometerEngine(
     programmedSavings =
       plan.macroGroups?.investimentos?.amountR$ !== undefined
         ? roundMoney(plan.macroGroups.investimentos.amountR$)
-        : roundMoney(declaredIncome * (invPct / 100));
+        : calculateMandatoryGoalAllocation({
+            newNetIncome: declaredIncome,
+            mandatoryGoalRate: invPct / 100,
+          }).mandatoryGoalAmount;
     if (
       plan.macroGroups?.fixos?.amountR$ !== undefined ||
       plan.macroGroups?.variaveis?.amountR$ !== undefined
@@ -271,7 +282,10 @@ export function calculateThermometerEngine(
     }
     declaredIncome = roundMoney(declaredIncome);
     const investmentsPct = state.profile?.investmentsPercentage ?? 10;
-    programmedSavings = roundMoney(declaredIncome * (investmentsPct / 100));
+    programmedSavings = calculateMandatoryGoalAllocation({
+      newNetIncome: declaredIncome,
+      mandatoryGoalRate: investmentsPct / 100,
+    }).mandatoryGoalAmount;
     expenseBudget = Math.max(0, roundMoney(declaredIncome - programmedSavings));
     hasExplicitCeiling = declaredIncome > 0 || Boolean(state.isCustomizedPercentages);
   }
@@ -737,6 +751,49 @@ export function calculateThermometerEngine(
     lastCheckedAt: lastConferredDate,
   };
 
+  const housingTotalCents = matchedCompetenceExpenses
+    .filter((e) => e.category === 'moradia')
+    .reduce((sum, e) => sum + toSafeCents(e.amount, e.amountCents), 0);
+  const groceriesTotalCents = matchedCompetenceExpenses
+    .filter((e) => e.category === 'comida')
+    .reduce((sum, e) => sum + toSafeCents(e.amount, e.amountCents), 0);
+  const routineTotalCents = matchedCompetenceExpenses
+    .filter((e) => e.category === 'transporte' || e.category === 'profissional')
+    .reduce((sum, e) => sum + toSafeCents(e.amount, e.amountCents), 0);
+  const essentialFixedTotalCents = matchedCompetenceExpenses
+    .filter((e) => e.category === 'protecao')
+    .reduce((sum, e) => sum + toSafeCents(e.amount, e.amountCents), 0);
+  const installmentsTotalCents = instOccurrences
+    .filter((i) => !i.alreadyInExpenses && i.status !== 'paid' && i.status !== 'advanced')
+    .reduce((sum, i) => sum + i.scopedCents, 0);
+
+  // TODO(Etapa 4-5): Migrar UI para ler waterfallV23 diretamente
+  const waterfallV23 = evaluateWaterfall({
+    householdConfig: {
+      mandatoryGoalRate: declaredIncome > 0 ? programmedSavings / declaredIncome : 0.1,
+    },
+    liquidity: {
+      settledIncomesTotal: declaredIncome,
+    },
+    housingTotal: roundMoney(housingTotalCents / 100),
+    essentialFixedTotal: roundMoney(essentialFixedTotalCents / 100),
+    cancelableFixedTotal: 0,
+    installmentsTotal: roundMoney(installmentsTotalCents / 100),
+    groceriesAmount: roundMoney(groceriesTotalCents / 100),
+    routineAmount: roundMoney(routineTotalCents / 100),
+    bufferAmount: roundMoney(
+      Math.max(
+        0,
+        totalConsumedCents -
+          housingTotalCents -
+          essentialFixedTotalCents -
+          installmentsTotalCents -
+          groceriesTotalCents -
+          routineTotalCents
+      ) / 100
+    ),
+  });
+
   return {
     scope,
     monthKey: currentMonthKey,
@@ -798,5 +855,6 @@ export function calculateThermometerEngine(
     coverageMessage,
     prioritizedActions: prioritizedActions.slice(0, 3),
     whatChangedSummary,
+    waterfallV23,
   };
 }
