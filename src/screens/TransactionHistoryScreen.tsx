@@ -400,7 +400,7 @@ export const TransactionHistoryScreen: React.FC<TransactionHistoryScreenProps> =
             >
               <option value="all">Todas as Origens</option>
               <option value="manual">✍️ Manual (GASTEI)</option>
-              <option value="pluggy_import">🏦 Extrato Bancário (Meu Pluggy)</option>
+              <option value="pluggy_import">🏦 Extrato Bancário (CSV Importado)</option>
               <option value="shift_payout">🩺 Plantão Médico</option>
               <option value="installment">💳 Parcelamento de Cartão</option>
               <option value="fixed_bill">🏠 Conta Fixa</option>

@@ -3156,7 +3156,7 @@ export const SettingsScreen: React.FC = () => {
                   </li>
                   <li className="flex items-start gap-2">
                     <span className="text-rose-500 font-bold">•</span>
-                    <span><strong>Todas as conexões bancárias</strong> (Open Finance / Meu Pluggy e credenciais).</span>
+                    <span><strong>Todas as importações de extratos</strong> (CSV importados e histórico bancário).</span>
                   </li>
                   <li className="flex items-start gap-2">
                     <span className="text-rose-500 font-bold">•</span>

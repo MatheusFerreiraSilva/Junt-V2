@@ -11,11 +11,13 @@ import {
   Trash2,
   CheckCircle,
   AlertTriangle,
+  Percent,
 } from 'lucide-react';
 import { useFinance } from '../../context/FinanceContext';
 import {
   MedicalShift,
   MedicalShiftPreset,
+  MedicalShiftStatusV2,
   ShiftContractType,
   ShiftSector,
 } from '../../types/finance';
@@ -23,8 +25,10 @@ import {
   SECTOR_CONFIG,
   CONTRACT_CONFIG,
   calculateEstimatedPayDate,
+  calculateShiftNetAmount,
   checkShiftOverlap,
 } from '../../utils/shiftsEngine';
+import { formatCurrency } from '../../utils/formatters';
 
 interface MedicalShiftModalProps {
   isOpen: boolean;
@@ -39,9 +43,11 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
 }) => {
   const {
     state,
+    householdConfig,
     medicalShiftPresets,
     addMedicalShift,
     updateMedicalShift,
+    markShiftAsReceivedDirectly,
     addShiftPreset,
     deleteShiftPreset,
   } = useFinance();
@@ -52,13 +58,34 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
       ? 'Parceiro 2'
       : state.profile.partner2Name;
 
+  const todayIso = new Date(Date.now() - new Date().getTimezoneOffset() * 60000)
+    .toISOString()
+    .slice(0, 10);
+
+  const initialLifecycle = (): MedicalShiftStatusV2 => {
+    if (shiftToEdit?.status === 'received') return 'paid';
+    if (shiftToEdit?.executionStatus === 'performed') return 'pending_payment';
+    if (shiftToEdit && shiftToEdit.dateWorked <= todayIso) return 'pending_payment';
+    return 'scheduled';
+  };
+
+  const initialTaxPercent = (() => {
+    if (shiftToEdit && shiftToEdit.grossAmount > 0 && shiftToEdit.netAmount !== undefined) {
+      const diff = shiftToEdit.grossAmount - shiftToEdit.netAmount;
+      if (diff > 0) {
+        return Number(((diff / shiftToEdit.grossAmount) * 100).toFixed(1));
+      }
+    }
+    return Number(((householdConfig?.defaultShiftTaxRate ?? 0) * 100).toFixed(1));
+  })();
+
   const [partner, setPartner] = useState<'partner1' | 'partner2'>(
     shiftToEdit ? shiftToEdit.partner : 'partner1'
   );
   const [title, setTitle] = useState<string>(shiftToEdit?.title || '');
-  const [executionStatus, setExecutionStatus] = useState<NonNullable<MedicalShift['executionStatus']>>(shiftToEdit?.executionStatus || (shiftToEdit && shiftToEdit.dateWorked <= new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10) ? 'performed' : 'scheduled'));
+  const [lifecycleStatus, setLifecycleStatus] = useState<MedicalShiftStatusV2>(initialLifecycle);
   const [dateWorked, setDateWorked] = useState<string>(
-    shiftToEdit ? shiftToEdit.dateWorked : new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0]
+    shiftToEdit ? shiftToEdit.dateWorked : todayIso
   );
   const [durationHours, setDurationHours] = useState<number>(
     shiftToEdit ? shiftToEdit.durationHours : 12
@@ -75,11 +102,15 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
   const [grossAmount, setGrossAmount] = useState<string>(
     shiftToEdit ? shiftToEdit.grossAmount.toString() : ''
   );
+  const [taxRatePercent, setTaxRatePercent] = useState<string>(String(initialTaxPercent));
   const [estimatedDelayDays, setEstimatedDelayDays] = useState<number>(
     CONTRACT_CONFIG.pj_oss.typicalDays
   );
   const [customPayDate, setCustomPayDate] = useState<string>(
     shiftToEdit ? shiftToEdit.estimatedPayDate : ''
+  );
+  const [paidAtDate, setPaidAtDate] = useState<string>(
+    shiftToEdit?.actualPayDate || todayIso
   );
   const [notes, setNotes] = useState<string>(shiftToEdit?.notes || '');
   const [startTime, setStartTime] = useState<string>(shiftToEdit?.startTime || '');
@@ -90,17 +121,22 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
   const [saveAsPreset, setSaveAsPreset] = useState<boolean>(false);
   const [presetTitle, setPresetTitle] = useState<string>('');
   const [showPresetManager, setShowPresetManager] = useState<boolean>(false);
-
   const [validationError, setValidationError] = useState('');
+
   const dialogRef = useDialogFocus(isOpen, onClose);
 
   const isCrossMidnight = Boolean(startTime && endTime && endTime <= startTime);
-
   const parsedCommute = commuteMinutes ? parseInt(commuteMinutes, 10) : undefined;
-  const parsedAmount = parseFloat(grossAmount) || 0;
-  const hourlyRate = durationHours > 0 ? parsedAmount / durationHours : 0;
+  const parsedGross = parseFloat(grossAmount) || 0;
+  const parsedTaxRate = Math.min(100, Math.max(0, parseFloat(taxRatePercent.replace(',', '.')) || 0)) / 100;
+  const calculatedNet = calculateShiftNetAmount(parsedGross, parsedTaxRate);
+  const taxReservedAmount = Math.max(0, parsedGross - calculatedNet);
+  const hourlyNetRate = durationHours > 0 ? calculatedNet / durationHours : 0;
   const calculatedPayDate =
     customPayDate || calculateEstimatedPayDate(dateWorked, estimatedDelayDays);
+
+  const executionStatus: NonNullable<MedicalShift['executionStatus']> =
+    lifecycleStatus === 'scheduled' ? 'scheduled' : 'performed';
 
   const overlapWarning = React.useMemo(() => {
     if (!dateWorked || !startTime || !endTime) return null;
@@ -113,9 +149,10 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
       contractType,
       dateWorked,
       durationHours,
-      grossAmount: parsedAmount,
+      grossAmount: parsedGross,
+      netAmount: calculatedNet,
       estimatedPayDate: calculatedPayDate,
-      status: 'pending',
+      status: lifecycleStatus === 'paid' ? 'received' : 'pending',
       startTime: startTime || undefined,
       endTime: endTime || undefined,
       commuteMinutes: parsedCommute,
@@ -133,7 +170,25 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
       }
     }
     return null;
-  }, [shiftToEdit, partner, title, hospitalName, sector, contractType, dateWorked, durationHours, parsedAmount, calculatedPayDate, startTime, endTime, parsedCommute, executionStatus, state.medicalShifts]);
+  }, [
+    shiftToEdit,
+    partner,
+    title,
+    hospitalName,
+    sector,
+    contractType,
+    dateWorked,
+    durationHours,
+    parsedGross,
+    calculatedNet,
+    calculatedPayDate,
+    lifecycleStatus,
+    startTime,
+    endTime,
+    parsedCommute,
+    executionStatus,
+    state.medicalShifts,
+  ]);
 
   if (!isOpen) return null;
 
@@ -159,8 +214,35 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!hospitalName.trim() || !Number.isFinite(parsedAmount) || parsedAmount <= 0 || !Number.isFinite(durationHours) || durationHours <= 0 || durationHours > 168 || !Number.isFinite(estimatedDelayDays) || estimatedDelayDays < 0 || estimatedDelayDays > 3650 || !/^\d{4}-\d{2}-\d{2}$/.test(dateWorked) || Number.isNaN(new Date(dateWorked + 'T12:00:00').getTime()) || !/^\d{4}-\d{2}-\d{2}$/.test(calculatedPayDate) || Number.isNaN(new Date(calculatedPayDate + 'T12:00:00').getTime())) { setValidationError('Confira hospital, valor, duração e datas antes de salvar.'); return; }
-    if (executionStatus === 'performed' && dateWorked > new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10)) { setValidationError('Um plantão futuro deve ficar como agendado.'); return; }
+    if (
+      !hospitalName.trim() ||
+      !Number.isFinite(parsedGross) ||
+      parsedGross <= 0 ||
+      !Number.isFinite(durationHours) ||
+      durationHours <= 0 ||
+      durationHours > 168 ||
+      !Number.isFinite(estimatedDelayDays) ||
+      estimatedDelayDays < 0 ||
+      estimatedDelayDays > 3650 ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(dateWorked) ||
+      Number.isNaN(new Date(dateWorked + 'T12:00:00').getTime()) ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(calculatedPayDate) ||
+      Number.isNaN(new Date(calculatedPayDate + 'T12:00:00').getTime())
+    ) {
+      setValidationError('Confira hospital, valor, duração e datas antes de salvar.');
+      return;
+    }
+
+    if (lifecycleStatus === 'pending_payment' && dateWorked > todayIso) {
+      setValidationError('Um plantão com data futura deve ficar como Agendado.');
+      return;
+    }
+
+    if (lifecycleStatus === 'paid' && !/^\d{4}-\d{2}-\d{2}$/.test(paidAtDate)) {
+      setValidationError('Informe a data de recebimento efetivo para marcar como Pago.');
+      return;
+    }
+
     setValidationError('');
 
     const finalTitle =
@@ -183,28 +265,39 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
         sector,
         hospitalName: hospitalName.trim(),
         contractType,
-        grossAmount: parsedAmount,
-        netAmount: parsedAmount,
+        grossAmount: parsedGross,
+        netAmount: calculatedNet,
         estimatedPayDate: calculatedPayDate,
+        actualPayDate: lifecycleStatus === 'paid' ? paidAtDate : undefined,
+        status: lifecycleStatus === 'paid' ? 'received' : 'pending',
         notes: notes.trim() || undefined,
         ...scheduleData,
       });
+      if (lifecycleStatus === 'paid' && shiftToEdit.status !== 'received') {
+        markShiftAsReceivedDirectly(shiftToEdit.id, paidAtDate, true);
+      }
     } else {
-      addMedicalShift({
+      const created = addMedicalShift({
         partner,
+        executionStatus,
         title: finalTitle,
         dateWorked,
         durationHours,
         sector,
         hospitalName: hospitalName.trim(),
         contractType,
-        grossAmount: parsedAmount,
-        netAmount: parsedAmount,
+        grossAmount: parsedGross,
+        netAmount: calculatedNet,
         estimatedPayDate: calculatedPayDate,
-        status: 'pending',
+        actualPayDate: lifecycleStatus === 'paid' ? paidAtDate : undefined,
+        status: lifecycleStatus === 'paid' ? 'received' : 'pending',
         notes: notes.trim() || undefined,
         ...scheduleData,
       });
+
+      if (lifecycleStatus === 'paid') {
+        markShiftAsReceivedDirectly(created.id, paidAtDate, true);
+      }
 
       if (saveAsPreset && (presetTitle.trim() || hospitalName.trim())) {
         addShiftPreset({
@@ -213,7 +306,7 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
           sector,
           contractType,
           defaultDurationHours: durationHours,
-          defaultGrossAmount: parsedAmount,
+          defaultGrossAmount: parsedGross,
           typicalPayDelayDays: estimatedDelayDays,
         });
       }
@@ -223,8 +316,15 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
   };
 
   return (
-    <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Plantão médico" tabIndex={-1} className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm overflow-y-auto">
-      <div className="bg-[#FAF7F2] dark:bg-[#111318] text-slate-800 dark:text-slate-100 rounded-[28px] max-w-xl w-full p-6 sm:p-8 shadow-2xl border border-stone-200 dark:border-stone-800 my-8">
+    <div
+      ref={dialogRef}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Plantão médico"
+      tabIndex={-1}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm overflow-y-auto"
+    >
+      <div className="bg-[#FAF7F2] dark:bg-[#111318] text-slate-800 dark:text-slate-100 rounded-[28px] max-w-xl w-full p-6 sm:p-8 shadow-2xl border border-stone-200 dark:border-stone-800 my-8 max-h-[92vh] overflow-y-auto">
         {/* Header */}
         <div className="flex items-center justify-between pb-4 border-b border-stone-200 dark:border-stone-800">
           <div className="flex items-center gap-3">
@@ -236,14 +336,14 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
                 {shiftToEdit ? 'Editar Plantão Médico' : 'Cadastrar Plantão Médico'}
               </h2>
               <p className="text-xs text-stone-500 dark:text-stone-400">
-                Previsão de recebimento, métricas de R$/hora e escala do casal
+                Competência vs Caixa · Reserva fiscal · R$/hora líquida
               </p>
             </div>
           </div>
           <button
             onClick={onClose}
             aria-label="Fechar"
-            className="p-2 rounded-full hover:bg-stone-200/60 dark:hover:bg-stone-800 text-stone-500 transition-colors"
+            className="min-w-[44px] min-h-[44px] rounded-xl hover:bg-stone-200/60 dark:hover:bg-stone-800 text-stone-500 transition-colors flex items-center justify-center"
           >
             <X className="w-5 h-5" />
           </button>
@@ -251,7 +351,7 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
 
         {/* Quick Presets Carousel (only for new shifts) */}
         {!shiftToEdit && (
-          <div className="mt-4 pt-1 pb-3">
+          <div className="mt-4 pt-1 pb-2">
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs font-semibold text-stone-500 dark:text-stone-400 uppercase tracking-wider">
                 Modelos Rápidos (1-Clique)
@@ -276,14 +376,13 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
                   <p className="font-semibold text-stone-800 dark:text-stone-200 group-hover:text-teal-600 dark:group-hover:text-teal-400">
                     {preset.name}
                   </p>
-                  <p className="text-[11px] text-stone-500">
-                    R$ {preset.defaultGrossAmount.toLocaleString('pt-BR')} • {preset.defaultDurationHours}h
+                  <p className="text-[11px] text-stone-500 tabular-nums">
+                    {formatCurrency(preset.defaultGrossAmount)} · {preset.defaultDurationHours}h
                   </p>
                 </button>
               ))}
             </div>
 
-            {/* Inline Preset Manager */}
             {showPresetManager && (
               <div className="mt-2 p-3 bg-stone-100 dark:bg-stone-900/60 rounded-xl border border-stone-200 dark:border-stone-800 text-xs space-y-2">
                 <p className="font-medium text-stone-700 dark:text-stone-300">
@@ -315,10 +414,57 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
           </div>
         )}
 
-        {validationError && <p role="alert" className="mt-4 p-3 rounded-xl text-xs bg-rose-50 dark:bg-rose-950/40 text-rose-800 dark:text-rose-200">{validationError}</p>}
-        <div className="mt-5"><label htmlFor="shift-execution-status" className="block text-xs font-semibold mb-2">Situação do trabalho</label><select id="shift-execution-status" value={executionStatus} onChange={event => setExecutionStatus(event.target.value as NonNullable<MedicalShift['executionStatus']>)} className="w-full min-h-11 px-3 rounded-xl border border-stone-200 dark:border-stone-700 bg-transparent"><option value="scheduled">Agendado</option><option value="performed">Realizado</option><option value="cancelled">Cancelado</option><option value="replaced">Substituído</option></select><p className="text-[11px] text-stone-500 mt-2">O trabalho e o recebimento são acompanhados separadamente.</p></div>
+        {validationError && (
+          <p role="alert" className="mt-4 p-3 rounded-xl text-xs bg-rose-50 dark:bg-rose-950/40 text-rose-800 dark:text-rose-200 font-semibold">
+            {validationError}
+          </p>
+        )}
+
         {/* Shift Form */}
         <form onSubmit={handleSubmit} className="mt-4 space-y-4">
+          {/* Status v2.3: Competencia vs Caixa */}
+          <div>
+            <label className="block text-xs font-semibold text-stone-600 dark:text-stone-300 mb-1.5">
+              Ciclo de Vida (Competência vs Caixa)
+            </label>
+            <div className="grid grid-cols-3 gap-2">
+              {[
+                { key: 'scheduled' as const, label: 'Agendado', sub: 'Não entra no caixa' },
+                { key: 'pending_payment' as const, label: 'Realizado / A Receber', sub: 'Card A Receber' },
+                { key: 'paid' as const, label: 'Pago (No Caixa)', sub: 'Entra na Cascata' },
+              ].map((opt) => (
+                <button
+                  key={opt.key}
+                  type="button"
+                  onClick={() => setLifecycleStatus(opt.key)}
+                  className={`min-h-[44px] p-2.5 rounded-xl border text-left transition-all ${
+                    lifecycleStatus === opt.key
+                      ? 'bg-stone-900 dark:bg-white text-white dark:text-stone-900 border-stone-900 dark:border-white'
+                      : 'bg-white dark:bg-stone-900 text-stone-700 dark:text-stone-300 border-stone-200 dark:border-stone-800'
+                  }`}
+                >
+                  <span className="block text-[11px] font-bold leading-tight">{opt.label}</span>
+                  <span className="block text-[10px] opacity-75 mt-0.5">{opt.sub}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {lifecycleStatus === 'paid' && (
+            <div className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800">
+              <label htmlFor="shift-paid-at" className="block text-xs font-semibold text-emerald-900 dark:text-emerald-200 mb-1">
+                Data Efetiva do Pagamento (Caixa)
+              </label>
+              <input
+                id="shift-paid-at"
+                type="date"
+                value={paidAtDate}
+                onChange={(e) => setPaidAtDate(e.target.value)}
+                className="w-full min-h-[44px] px-3 py-2 text-sm rounded-xl bg-white dark:bg-stone-900 border border-emerald-300 dark:border-emerald-700"
+              />
+            </div>
+          )}
+
           {/* Partner Selector */}
           <div>
             <label className="block text-xs font-semibold text-stone-600 dark:text-stone-300 mb-1.5">
@@ -328,7 +474,7 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
               <button
                 type="button"
                 onClick={() => setPartner('partner1')}
-                className={`py-2 px-3 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 border transition-all ${
+                className={`min-h-[44px] py-2 px-3 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 border transition-all ${
                   partner === 'partner1'
                     ? 'bg-teal-600 text-white border-teal-600 shadow-sm'
                     : 'bg-white dark:bg-stone-900 text-stone-700 dark:text-stone-300 border-stone-200 dark:border-stone-800'
@@ -339,7 +485,7 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
               <button
                 type="button"
                 onClick={() => setPartner('partner2')}
-                className={`py-2 px-3 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 border transition-all ${
+                className={`min-h-[44px] py-2 px-3 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 border transition-all ${
                   partner === 'partner2'
                     ? 'bg-rose-600 text-white border-rose-600 shadow-sm'
                     : 'bg-white dark:bg-stone-900 text-stone-700 dark:text-stone-300 border-stone-200 dark:border-stone-800'
@@ -356,21 +502,20 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
               Hospital ou Unidade de Saúde
             </label>
             <div className="relative">
-              <Building2 className="w-4 h-4 absolute left-3 top-3 text-stone-400" />
+              <Building2 className="w-4 h-4 absolute left-3 top-3.5 text-stone-400" />
               <input
                 type="text"
                 required
                 value={hospitalName}
                 onChange={(e) => setHospitalName(e.target.value)}
                 placeholder="Ex: UPA Marechal Hermes, Hospital Barra D'Or, Samaritano"
-                className="w-full pl-9 pr-3 py-2 text-sm rounded-xl bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 focus:outline-none focus:ring-2 focus:ring-teal-500"
+                className="w-full min-h-[44px] pl-9 pr-3 py-2 text-sm rounded-xl bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 focus:outline-none focus:ring-2 focus:ring-teal-500"
               />
             </div>
           </div>
 
           {/* Sector & Duration in 2 cols */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {/* Sector */}
             <div>
               <label className="block text-xs font-semibold text-stone-600 dark:text-stone-300 mb-1">
                 Setor / Atuação Clínica
@@ -378,7 +523,7 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
               <select
                 value={sector}
                 onChange={(e) => setSector(e.target.value as ShiftSector)}
-                className="w-full py-2 px-3 text-sm rounded-xl bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 focus:outline-none focus:ring-2 focus:ring-teal-500"
+                className="w-full min-h-[44px] py-2 px-3 text-sm rounded-xl bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 focus:outline-none focus:ring-2 focus:ring-teal-500"
               >
                 {(Object.keys(SECTOR_CONFIG) as ShiftSector[]).map((secKey) => (
                   <option key={secKey} value={secKey}>
@@ -388,7 +533,6 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
               </select>
             </div>
 
-            {/* Duration */}
             <div>
               <label className="block text-xs font-semibold text-stone-600 dark:text-stone-300 mb-1">
                 Duração do Plantão (Horas)
@@ -399,7 +543,7 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
                     key={hours}
                     type="button"
                     onClick={() => setDurationHours(hours)}
-                    className={`py-2 text-xs font-semibold rounded-lg border transition-all ${
+                    className={`min-h-[44px] py-2 text-xs font-semibold rounded-xl border transition-all ${
                       durationHours === hours
                         ? 'bg-stone-800 dark:bg-stone-200 text-white dark:text-stone-900 border-stone-800 dark:border-stone-200'
                         : 'bg-white dark:bg-stone-900 text-stone-600 dark:text-stone-300 border-stone-200 dark:border-stone-800'
@@ -412,14 +556,14 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
             </div>
           </div>
 
-          {/* Date & Gross Amount */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {/* Date, Gross Amount & Tax Reserve */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div>
               <label className="block text-xs font-semibold text-stone-600 dark:text-stone-300 mb-1">
-                Data Realizada do Plantão
+                Data do Plantão
               </label>
               <div className="relative">
-                <Calendar className="w-4 h-4 absolute left-3 top-3 text-stone-400" />
+                <Calendar className="w-4 h-4 absolute left-3 top-3.5 text-stone-400" />
                 <input
                   type="date"
                   required
@@ -430,17 +574,17 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
                       calculateEstimatedPayDate(e.target.value, estimatedDelayDays)
                     );
                   }}
-                  className="w-full pl-9 pr-3 py-2 text-sm rounded-xl bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 focus:outline-none focus:ring-2 focus:ring-teal-500"
+                  className="w-full min-h-[44px] pl-9 pr-2 py-2 text-sm rounded-xl bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 focus:outline-none focus:ring-2 focus:ring-teal-500"
                 />
               </div>
             </div>
 
             <div>
               <label className="block text-xs font-semibold text-stone-600 dark:text-stone-300 mb-1">
-                Valor Bruto do Plantão (R$)
+                Valor Bruto (R$)
               </label>
               <div className="relative">
-                <DollarSign className="w-4 h-4 absolute left-3 top-3 text-stone-400" />
+                <DollarSign className="w-4 h-4 absolute left-3 top-3.5 text-stone-400" />
                 <input
                   type="number"
                   step="0.01"
@@ -448,21 +592,49 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
                   value={grossAmount}
                   onChange={(e) => setGrossAmount(e.target.value)}
                   placeholder="1600"
-                  className="w-full pl-9 pr-3 py-2 text-sm rounded-xl bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 focus:outline-none focus:ring-2 focus:ring-teal-500"
+                  className="w-full min-h-[44px] pl-9 pr-2 py-2 text-sm rounded-xl bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 focus:outline-none focus:ring-2 focus:ring-teal-500 tabular-nums"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label htmlFor="shift-tax-rate" className="block text-xs font-semibold text-stone-600 dark:text-stone-300 mb-1">
+                Imposto PJ/RPA (%)
+              </label>
+              <div className="relative">
+                <Percent className="w-4 h-4 absolute left-3 top-3.5 text-stone-400" />
+                <input
+                  id="shift-tax-rate"
+                  type="number"
+                  min="0"
+                  max="50"
+                  step="0.5"
+                  value={taxRatePercent}
+                  onChange={(e) => setTaxRatePercent(e.target.value)}
+                  placeholder="0"
+                  className="w-full min-h-[44px] pl-9 pr-2 py-2 text-sm rounded-xl bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 focus:outline-none focus:ring-2 focus:ring-teal-500 tabular-nums"
                 />
               </div>
             </div>
           </div>
 
-          {/* Hourly Rate Preview Pill */}
-          <div className="flex items-center justify-between px-3 py-2 rounded-xl bg-teal-500/10 dark:bg-teal-500/20 text-teal-800 dark:text-teal-300 text-xs">
-            <span className="font-medium">Rentabilidade por Hora:</span>
-            <span className="font-bold text-sm">
-              R$ {hourlyRate.toFixed(2)} / hora
-            </span>
+          {/* Net vs Gross Live Preview */}
+          <div className="p-3.5 rounded-xl bg-teal-500/10 dark:bg-teal-500/15 border border-teal-500/20 text-xs space-y-1">
+            <div className="flex items-center justify-between text-teal-900 dark:text-teal-200">
+              <span className="font-semibold">Valor Líquido para Cascata</span>
+              <span className="font-extrabold text-sm tabular-nums">
+                {formatCurrency(calculatedNet)}
+              </span>
+            </div>
+            <div className="flex items-center justify-between text-[11px] text-teal-800/80 dark:text-teal-300/80 tabular-nums">
+              <span>
+                Bruto {formatCurrency(parsedGross)} · Reserva Fiscal {formatCurrency(taxReservedAmount)}
+              </span>
+              <span>{formatCurrency(hourlyNetRate)} / hora líquida</span>
+            </div>
           </div>
 
-          {/* Horários & Planejamento de Escala (10) */}
+          {/* Horários & Planejamento de Escala */}
           <div className="p-3.5 rounded-2xl bg-stone-100/80 dark:bg-stone-900/80 border border-stone-200 dark:border-stone-800 space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-1.5 text-xs font-bold text-stone-700 dark:text-stone-300">
@@ -470,7 +642,7 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
                 Horário e Deslocamento (Agenda)
               </div>
               {isCrossMidnight && (
-                <span className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 font-semibold border border-indigo-500/20">
+                <span className="text-[11px] text-indigo-700 dark:text-indigo-300 font-semibold">
                   🌙 Vira a noite (+1 dia)
                 </span>
               )}
@@ -485,7 +657,7 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
                   type="time"
                   value={startTime}
                   onChange={(e) => setStartTime(e.target.value)}
-                  className="w-full px-2.5 py-1.5 text-xs rounded-xl bg-white dark:bg-stone-800 border border-stone-200 dark:border-stone-700 focus:outline-none focus:ring-2 focus:ring-teal-500"
+                  className="w-full min-h-[44px] px-2.5 py-1.5 text-xs rounded-xl bg-white dark:bg-stone-800 border border-stone-200 dark:border-stone-700 focus:outline-none focus:ring-2 focus:ring-teal-500"
                 />
               </div>
 
@@ -497,7 +669,7 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
                   type="time"
                   value={endTime}
                   onChange={(e) => setEndTime(e.target.value)}
-                  className="w-full px-2.5 py-1.5 text-xs rounded-xl bg-white dark:bg-stone-800 border border-stone-200 dark:border-stone-700 focus:outline-none focus:ring-2 focus:ring-teal-500"
+                  className="w-full min-h-[44px] px-2.5 py-1.5 text-xs rounded-xl bg-white dark:bg-stone-800 border border-stone-200 dark:border-stone-700 focus:outline-none focus:ring-2 focus:ring-teal-500"
                 />
               </div>
 
@@ -513,7 +685,7 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
                   value={commuteMinutes}
                   onChange={(e) => setCommuteMinutes(e.target.value)}
                   placeholder="Ex: 30"
-                  className="w-full px-2.5 py-1.5 text-xs rounded-xl bg-white dark:bg-stone-800 border border-stone-200 dark:border-stone-700 focus:outline-none focus:ring-2 focus:ring-teal-500"
+                  className="w-full min-h-[44px] px-2.5 py-1.5 text-xs rounded-xl bg-white dark:bg-stone-800 border border-stone-200 dark:border-stone-700 focus:outline-none focus:ring-2 focus:ring-teal-500"
                 />
               </div>
             </div>
@@ -528,10 +700,12 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
               </div>
             )}
           </div>
+
+          {/* Contract & Pay Delay */}
           <div className="p-3.5 rounded-2xl bg-stone-100/80 dark:bg-stone-900/80 border border-stone-200 dark:border-stone-800 space-y-3">
             <div className="flex items-center gap-1.5 text-xs font-bold text-stone-700 dark:text-stone-300">
               <Briefcase className="w-4 h-4 text-teal-600 dark:text-teal-400" />
-              Regime de Pagamento & Janela Real
+              Regime de Pagamento &amp; Janela Real
             </div>
 
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
@@ -540,7 +714,7 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
                   key={cKey}
                   type="button"
                   onClick={() => handleContractChange(cKey)}
-                  className={`p-2 rounded-xl text-left border transition-all text-xs ${
+                  className={`min-h-[44px] p-2 rounded-xl text-left border transition-all text-xs ${
                     contractType === cKey
                       ? 'bg-white dark:bg-stone-800 border-teal-500 dark:border-teal-400 shadow-sm'
                       : 'bg-transparent border-transparent hover:bg-white/50 dark:hover:bg-stone-800/50'
@@ -556,13 +730,12 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
               ))}
             </div>
 
-            {/* Custom Delay Days Slider */}
             <div>
               <div className="flex justify-between items-center text-xs mb-1">
                 <span className="text-stone-600 dark:text-stone-400">
                   Estimativa de Dias para Receber:
                 </span>
-                <span className="font-bold text-stone-800 dark:text-stone-200">
+                <span className="font-bold text-stone-800 dark:text-stone-200 tabular-nums">
                   D+{estimatedDelayDays} dias
                 </span>
               </div>
@@ -573,7 +746,7 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
                 step="5"
                 value={estimatedDelayDays}
                 onChange={(e) => {
-                  const val = parseInt(e.target.value);
+                  const val = parseInt(e.target.value, 10);
                   setEstimatedDelayDays(val);
                   setCustomPayDate(calculateEstimatedPayDate(dateWorked, val));
                 }}
@@ -599,7 +772,7 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
               placeholder="Ex: Troca com colega, leito extra na UTI, aguardar emissão de NF"
-              className="w-full px-3 py-2 text-xs rounded-xl bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 focus:outline-none focus:ring-2 focus:ring-teal-500"
+              className="w-full min-h-[44px] px-3 py-2 text-xs rounded-xl bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 focus:outline-none focus:ring-2 focus:ring-teal-500"
             />
           </div>
 
@@ -634,13 +807,13 @@ export const MedicalShiftModal: React.FC<MedicalShiftModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2.5 rounded-xl text-xs font-semibold text-stone-600 dark:text-stone-400 hover:bg-stone-200/60 dark:hover:bg-stone-800 transition-colors"
+              className="min-h-[44px] px-4 py-2.5 rounded-xl text-xs font-semibold text-stone-600 dark:text-stone-400 hover:bg-stone-200/60 dark:hover:bg-stone-800 transition-colors"
             >
               Cancelar
             </button>
             <button
               type="submit"
-              className="px-5 py-2.5 rounded-xl text-xs font-bold text-white bg-teal-600 hover:bg-teal-700 shadow-md transition-all flex items-center gap-1.5"
+              className="min-h-[44px] px-5 py-2.5 rounded-xl text-xs font-bold text-white bg-teal-600 hover:bg-teal-700 shadow-md transition-all flex items-center gap-1.5"
             >
               <CheckCircle className="w-4 h-4" />
               {shiftToEdit ? 'Atualizar Plantão' : 'Salvar Plantão na Escala'}

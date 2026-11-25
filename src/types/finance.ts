@@ -84,6 +84,7 @@ export interface SharedAllowanceExpense {
   paidByUid: string;
   date: string;
   cycleId: string;
+  importHash?: string | null;
 }
 
 export interface InstallmentPlan {
@@ -170,6 +171,7 @@ export interface AllowanceExpense {
   installmentInfo?: AllowanceInstallmentInfo | null;
   date: string;
   cycleId: string;
+  importHash?: string | null;
 }
 
 // =============================================================================

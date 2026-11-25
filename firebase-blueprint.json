@@ -124,7 +124,8 @@
         "splitPerPartner": { "type": "number", "description": "Must equal totalAmount / 2" },
         "paidByUid": { "type": "string", "maxLength": 128 },
         "date": { "type": "string", "format": "date-time", "maxLength": 64 },
-        "cycleId": { "type": "string", "pattern": "^[0-9]{4}_[0-9]{2}$" }
+        "cycleId": { "type": "string", "pattern": "^[0-9]{4}_[0-9]{2}$" },
+        "importHash": { "type": "string", "maxLength": 256, "description": "Nullable deduplication hash" }
       },
       "required": ["title", "category", "totalAmount", "splitPerPartner", "paidByUid", "date", "cycleId"]
     },
@@ -254,7 +255,8 @@
           "description": "Nullable installment info limited to 50% of allowanceFloor"
         },
         "date": { "type": "string", "format": "date-time", "maxLength": 64 },
-        "cycleId": { "type": "string", "pattern": "^[0-9]{4}_[0-9]{2}$" }
+        "cycleId": { "type": "string", "pattern": "^[0-9]{4}_[0-9]{2}$" },
+        "importHash": { "type": "string", "maxLength": 256, "description": "Nullable deduplication hash" }
       },
       "required": ["title", "amount", "date", "cycleId"]
     },

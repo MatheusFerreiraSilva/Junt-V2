@@ -1,27 +1,373 @@
 import {
+  HospitalIncomeMappingRule,
+  HouseholdConfig,
+  IncomeItem,
+  MedicalCareerProfile,
   MedicalShift,
   MedicalShiftPreset,
-  HospitalIncomeMappingRule,
+  MedicalShiftRecord,
+  MedicalShiftStatusV2,
+  ShiftContractType,
+  ShiftIncomeAllocation,
   ShiftPacingRecommendation,
   ShiftSector,
-  ShiftContractType,
-  IncomeItem,
-  ShiftIncomeAllocation,
-  MedicalCareerProfile,
 } from '../types/finance';
+import {
+  addCyclesToCycleId,
+  calculateCycleLiquidity,
+  clampRate,
+  resolveHouseholdConfig,
+  roundMoney,
+} from '../domain/waterfallEngine';
 import { formatMonthYear, getNextMonth } from './formatters';
+
+// =============================================================================
+// MOTOR UNIFICADO v2.3 DE PLANTÕES MÉDICOS (COMPETÊNCIA vs CAIXA REALIZADO)
+// =============================================================================
 
 export function shiftCivilToday(): string {
   const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
+    now.getDate()
+  ).padStart(2, '0')}`;
 }
+
+/**
+ * Converte uma data civil/ISO (YYYY-MM-DD ou ISO timestamp) para cycleId YYYY_MM,
+ * respeitando o dia de virada do ciclo do household (default = 1).
+ */
+export function getCycleIdFromDate(dateStr: string, cycleStartDay: number = 1): string {
+  const clean = (dateStr || '').trim().slice(0, 10);
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(clean);
+  if (!match) {
+    const today = shiftCivilToday();
+    return `${today.slice(0, 4)}_${today.slice(5, 7)}`;
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const baseCycleId = `${year}_${String(month).padStart(2, '0')}`;
+  if (cycleStartDay > 1 && day < cycleStartDay) {
+    return addCyclesToCycleId(baseCycleId, -1);
+  }
+  return baseCycleId;
+}
+
+/**
+ * Calcula o valor líquido do plantão descontando a reserva de imposto PJ/RPA configurada.
+ * Na graduação (taxRate = 0), líquido === bruto.
+ */
+export function calculateShiftNetAmount(
+  grossAmount: number,
+  taxReserveRate: number = 0
+): number {
+  const safeGross = Math.max(0, Number.isFinite(grossAmount) ? grossAmount : 0);
+  const safeRate = clampRate(taxReserveRate, 0, 1);
+  return roundMoney(safeGross * (1 - safeRate));
+}
+
+export interface CreateMedicalShiftInput {
+  id?: string;
+  doctorUid: string;
+  institution: string;
+  shiftDate: string;
+  hours: number;
+  grossAmount: number;
+  taxReserveRate?: number;
+  netAmount?: number;
+  status?: MedicalShiftStatusV2;
+  expectedPayDate?: string;
+  delayDays?: number;
+  paidAt?: string | null;
+}
+
+/**
+ * Cria um registro canônico MedicalShiftRecord respeitando o ciclo de vida:
+ * "scheduled" (Agendado) -> "pending_payment" (Realizado / A Receber) -> "paid" (Pago).
+ */
+export function createMedicalShiftRecord(
+  input: CreateMedicalShiftInput,
+  defaultShiftTaxRate: number = 0
+): MedicalShiftRecord {
+  const institution = (input.institution || '').trim();
+  if (!institution) {
+    throw new Error('Informe o hospital ou instituição do plantão.');
+  }
+  if (!input.doctorUid?.trim()) {
+    throw new Error('Informe o médico responsável pelo plantão.');
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(input.shiftDate)) {
+    throw new Error('Data do plantão inválida. Use o formato YYYY-MM-DD.');
+  }
+  if (!Number.isFinite(input.hours) || input.hours <= 0 || input.hours > 72) {
+    throw new Error('A duração do plantão deve estar entre 1 e 72 horas.');
+  }
+  if (!Number.isFinite(input.grossAmount) || input.grossAmount <= 0) {
+    throw new Error('O valor bruto do plantão deve ser maior que zero.');
+  }
+
+  const grossAmount = roundMoney(input.grossAmount);
+  const taxRate = clampRate(input.taxReserveRate ?? defaultShiftTaxRate);
+  const computedNet =
+    input.netAmount !== undefined && Number.isFinite(input.netAmount)
+      ? Math.min(grossAmount, Math.max(0.01, roundMoney(input.netAmount)))
+      : Math.max(0.01, calculateShiftNetAmount(grossAmount, taxRate));
+
+  const status: MedicalShiftStatusV2 = input.status ?? 'scheduled';
+  const expectedPayDate =
+    input.expectedPayDate && /^\d{4}-\d{2}-\d{2}$/.test(input.expectedPayDate)
+      ? input.expectedPayDate
+      : calculateEstimatedPayDate(input.shiftDate, input.delayDays ?? 30);
+
+  let paidAt: string | null | undefined = null;
+  if (status === 'paid') {
+    paidAt =
+      input.paidAt && /^\d{4}-\d{2}-\d{2}$/.test(input.paidAt)
+        ? input.paidAt
+        : expectedPayDate;
+  }
+
+  return {
+    ...(input.id ? { id: input.id } : {}),
+    doctorUid: input.doctorUid.trim(),
+    institution,
+    shiftDate: input.shiftDate,
+    hours: roundMoney(input.hours),
+    grossAmount,
+    netAmount: computedNet,
+    status,
+    expectedPayDate,
+    paidAt,
+  };
+}
+
+/**
+ * Executa transição estrita de status do plantão separando competência de caixa.
+ */
+export function transitionShiftStatus(
+  shift: MedicalShiftRecord,
+  nextStatus: MedicalShiftStatusV2,
+  paidAt?: string
+): MedicalShiftRecord {
+  if (nextStatus === 'paid') {
+    const resolvedPaidAt =
+      paidAt && /^\d{4}-\d{2}-\d{2}$/.test(paidAt)
+        ? paidAt
+        : shiftCivilToday();
+    return {
+      ...shift,
+      status: 'paid',
+      paidAt: resolvedPaidAt,
+    };
+  }
+
+  return {
+    ...shift,
+    status: nextStatus,
+    paidAt: null,
+  };
+}
+
+export interface CycleShiftsSummary {
+  cycleId: string;
+  paidShifts: MedicalShiftRecord[];
+  receivableShifts: MedicalShiftRecord[];
+  scheduledShifts: MedicalShiftRecord[];
+  pendingPaymentShifts: MedicalShiftRecord[];
+  paidShiftsNetTotal: number;
+  receivableShiftsNetTotal: number;
+  scheduledShiftsNetTotal: number;
+  pendingPaymentShiftsNetTotal: number;
+  paidCount: number;
+  scheduledCount: number;
+  pendingPaymentCount: number;
+  workedHoursInCycle: number;
+  scheduledHoursInCycle: number;
+  averageNetPerHour: number;
+}
+
+/**
+ * Conecta plantões diretamente ao waterfallEngine.calculateCycleLiquidity:
+ * - Apenas plantões `status === "paid"` cuja data de recebimento (`paidAt`) cai em `cycleId`
+ *   entram em `paidShiftsNetTotal` (e consequentemente em `newNetIncome`).
+ * - Plantões `scheduled` e `pending_payment` são somados à parte em `receivableShiftsNetTotal`
+ *   e NUNCA inflam o caixa nem o teto de parcelas.
+ */
+export function summarizeShiftsForCycle(
+  shifts: MedicalShiftRecord[],
+  cycleId: string,
+  householdConfig?: Partial<HouseholdConfig>
+): CycleShiftsSummary {
+  const config = resolveHouseholdConfig(householdConfig);
+  const startDay = config.cycleStartDay;
+
+  const paidShifts: MedicalShiftRecord[] = [];
+  const scheduledShifts: MedicalShiftRecord[] = [];
+  const pendingPaymentShifts: MedicalShiftRecord[] = [];
+
+  let workedHoursInCycle = 0;
+  let scheduledHoursInCycle = 0;
+  let workedNetForHourly = 0;
+
+  for (const shift of shifts) {
+    if (!shift) continue;
+    const shiftCompetenceCycle = getCycleIdFromDate(shift.shiftDate, startDay);
+    const shiftCashCycle = shift.paidAt
+      ? getCycleIdFromDate(shift.paidAt, startDay)
+      : getCycleIdFromDate(shift.expectedPayDate, startDay);
+
+    if (shift.status === 'paid') {
+      if (shiftCashCycle === cycleId) {
+        paidShifts.push(shift);
+      }
+      if (shiftCompetenceCycle === cycleId) {
+        workedHoursInCycle += shift.hours || 0;
+        workedNetForHourly += shift.netAmount || 0;
+      }
+    } else if (shift.status === 'pending_payment') {
+      pendingPaymentShifts.push(shift);
+      if (shiftCompetenceCycle === cycleId) {
+        workedHoursInCycle += shift.hours || 0;
+        workedNetForHourly += shift.netAmount || 0;
+      }
+    } else if (shift.status === 'scheduled') {
+      scheduledShifts.push(shift);
+      if (shiftCompetenceCycle === cycleId) {
+        scheduledHoursInCycle += shift.hours || 0;
+      }
+    }
+  }
+
+  const receivableShifts = [...pendingPaymentShifts, ...scheduledShifts];
+
+  const liquidity = calculateCycleLiquidity({
+    shifts: [...paidShifts, ...receivableShifts],
+    defaultShiftTaxRate: config.defaultShiftTaxRate,
+  });
+
+  const averageNetPerHour =
+    workedHoursInCycle > 0 ? roundMoney(workedNetForHourly / workedHoursInCycle) : 0;
+
+  return {
+    cycleId,
+    paidShifts,
+    receivableShifts,
+    scheduledShifts,
+    pendingPaymentShifts,
+    paidShiftsNetTotal: liquidity.paidShiftsNetTotal,
+    receivableShiftsNetTotal: liquidity.receivableShiftsTotal,
+    scheduledShiftsNetTotal: liquidity.scheduledShiftsTotal,
+    pendingPaymentShiftsNetTotal: liquidity.pendingPaymentShiftsTotal,
+    paidCount: paidShifts.length,
+    scheduledCount: scheduledShifts.length,
+    pendingPaymentCount: pendingPaymentShifts.length,
+    workedHoursInCycle: roundMoney(workedHoursInCycle),
+    scheduledHoursInCycle: roundMoney(scheduledHoursInCycle),
+    averageNetPerHour,
+  };
+}
+
+export interface ShiftCreditMatchCandidate {
+  shift: MedicalShiftRecord;
+  score: number;
+  exactAmountMatch: boolean;
+  institutionMatch: boolean;
+  reason: string;
+}
+
+export interface ShiftCreditMatchResult {
+  exactMatch: MedicalShiftRecord | null;
+  candidates: ShiftCreditMatchCandidate[];
+}
+
+function normalizeTextForMatch(text: string): string {
+  return (text || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase()
+    .trim();
+}
+
+/**
+ * Encontra plantões com status `pending_payment` compatíveis com um crédito do extrato CSV
+ * para oferecer vinculação em 1 clique ("Vincular ao Plantão X e marcar como Pago").
+ */
+export function findMatchingShiftForCredit(
+  credit: { amount: number; description: string; date: string; doctorUid?: string },
+  shifts: MedicalShiftRecord[]
+): ShiftCreditMatchResult {
+  const creditAmount = roundMoney(Math.abs(credit.amount || 0));
+  if (creditAmount <= 0) {
+    return { exactMatch: null, candidates: [] };
+  }
+
+  const descNorm = normalizeTextForMatch(credit.description);
+  const candidates: ShiftCreditMatchCandidate[] = [];
+
+  for (const shift of shifts) {
+    if (!shift || shift.status !== 'pending_payment') continue;
+    if (credit.doctorUid && shift.doctorUid && credit.doctorUid !== shift.doctorUid) {
+      continue;
+    }
+
+    const net = roundMoney(shift.netAmount || shift.grossAmount);
+    const gross = roundMoney(shift.grossAmount);
+    const diffNet = Math.abs(creditAmount - net);
+    const diffGross = Math.abs(creditAmount - gross);
+    const minDiff = Math.min(diffNet, diffGross);
+
+    const exactAmountMatch = minDiff <= 0.05;
+    const closeAmountMatch = minDiff <= Math.max(50, net * 0.08);
+
+    const instTokens = normalizeTextForMatch(shift.institution)
+      .split(/\s+/)
+      .filter((t) => t.length >= 3 && !['HOSPITAL', 'UPA', 'CLINICA', 'MEDICO'].includes(t));
+    const institutionMatch =
+      instTokens.length > 0 && instTokens.some((tok) => descNorm.includes(tok));
+
+    if (!closeAmountMatch && !institutionMatch) continue;
+
+    let score = 0;
+    if (exactAmountMatch) score += 60;
+    else if (closeAmountMatch) score += 30;
+    if (institutionMatch) score += 35;
+    if (credit.date >= shift.shiftDate) score += 5;
+
+    const reasons: string[] = [];
+    if (exactAmountMatch) reasons.push('Valor líquido exato');
+    else if (closeAmountMatch) reasons.push(`Valor próximo (diferença R$ ${minDiff.toFixed(2)})`);
+    if (institutionMatch) reasons.push('Instituição compatível');
+
+    candidates.push({
+      shift,
+      score,
+      exactAmountMatch,
+      institutionMatch,
+      reason: reasons.join(' · ') || 'Plantão a receber',
+    });
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+  const top = candidates[0];
+  const exactMatch = top && (top.exactAmountMatch || top.score >= 60) ? top.shift : null;
+
+  return { exactMatch, candidates };
+}
+
+// =============================================================================
+// ADAPTADORES DE TRANSIÇÃO LEGADA (Etapa 4 migrará MedicalShiftsScreen completa)
+// =============================================================================
 
 export function isActiveShift(shift: MedicalShift): boolean {
   return shift.executionStatus !== 'cancelled' && shift.executionStatus !== 'replaced';
 }
 
 export function isPerformedShift(shift: MedicalShift): boolean {
-  return isActiveShift(shift) && shift.executionStatus !== 'scheduled' && shift.dateWorked <= shiftCivilToday();
+  return (
+    isActiveShift(shift) &&
+    shift.executionStatus !== 'scheduled' &&
+    shift.dateWorked <= shiftCivilToday()
+  );
 }
 
 export const SECTOR_CONFIG: Record<
@@ -90,7 +436,7 @@ export const CONTRACT_CONFIG: Record<
     typicalDays: 5,
   },
   pj_privado: {
-    label: 'Pessoa Jurídica (Rede Privada D\'Or / Unimed)',
+    label: "Pessoa Jurídica (Rede Privada D'Or / Unimed)",
     short: 'PJ Privado (D+30)',
     delayHint: 'Pagamento 30 a 60 dias após fechamento da escala',
     typicalDays: 30,
@@ -138,8 +484,8 @@ export const DEFAULT_SHIFT_PRESETS: MedicalShiftPreset[] = [
   },
   {
     id: 'preset-dor-uti',
-    name: 'UTI Geral Copa D\'Or 12h (PJ D+30)',
-    hospitalName: 'Hospital Copa D\'Or',
+    name: "UTI Geral Copa D'Or 12h (PJ D+30)",
+    hospitalName: "Hospital Copa D'Or",
     sector: 'uti',
     contractType: 'pj_privado',
     defaultDurationHours: 12,
@@ -169,7 +515,7 @@ export const DEFAULT_SHIFT_PRESETS: MedicalShiftPreset[] = [
   {
     id: 'preset-enfermaria-visita',
     name: 'Visita de Enfermaria 6h (PJ D+30)',
-    hospitalName: 'Hospital Quinta D\'Or',
+    hospitalName: "Hospital Quinta D'Or",
     sector: 'enfermaria',
     contractType: 'pj_privado',
     defaultDurationHours: 6,
@@ -181,8 +527,8 @@ export const DEFAULT_SHIFT_PRESETS: MedicalShiftPreset[] = [
 export const DEFAULT_HOSPITAL_MAPPING_RULES: HospitalIncomeMappingRule[] = [
   {
     id: 'rule-hosp-1',
-    hospitalName: 'Hospital Copa D\'Or',
-    keywordPattern: 'D\'OR',
+    hospitalName: "Hospital Copa D'Or",
+    keywordPattern: "D'OR",
     createdAt: '2026-10-01T00:00:00Z',
   },
   {
@@ -199,9 +545,6 @@ export const DEFAULT_HOSPITAL_MAPPING_RULES: HospitalIncomeMappingRule[] = [
   },
 ];
 
-/**
- * Calculates estimated pay date given worked date and delay in days
- */
 export function calculateEstimatedPayDate(workedDateStr: string, delayDays: number): string {
   const [year, month, day] = workedDateStr.split('-').map(Number);
   const worked = new Date(year, month - 1, day);
@@ -214,25 +557,19 @@ export function calculateEstimatedPayDate(workedDateStr: string, delayDays: numb
 }
 
 export interface ShiftBalance {
-  expectedAmount: number; // in R$ (preserves explicit zero netAmount)
-  receivedAmount: number; // in R$ (from shiftIncomeAllocations cents / 100)
-  pendingAmount: number; // in R$ Math.max(0, expectedAmount - receivedAmount)
-  overallocatedAmount: number; // in R$ Math.max(0, receivedAmount - expectedAmount)
+  expectedAmount: number;
+  receivedAmount: number;
+  pendingAmount: number;
+  overallocatedAmount: number;
   isFullyPaid: boolean;
   isPartiallyPaid: boolean;
   isOverallocated: boolean;
 }
 
-/**
- * Expected receivable for a shift: strictly respects netAmount when provided (including explicit 0).
- */
 export function getShiftExpectedAmount(shift: MedicalShift): number {
-  return shift.netAmount !== undefined ? shift.netAmount : (shift.grossAmount ?? 0);
+  return shift.netAmount !== undefined ? shift.netAmount : shift.grossAmount ?? 0;
 }
 
-/**
- * Single source of truth for a shift's financial balance based on allocation ledgers.
- */
 export function getShiftBalance(
   shift: MedicalShift,
   ledgers: ShiftIncomeAllocation[] = []
@@ -244,7 +581,6 @@ export function getShiftBalance(
     return sum + (ledger.allocations[shift.id] || 0);
   }, 0);
 
-  // Fallback to legacy status === 'received' only when no ledgers exist
   let receivedCents = allocatedCents;
   if (receivedCents === 0 && shift.status === 'received' && isPerformedShift(shift)) {
     receivedCents = expectedCents;
@@ -254,7 +590,9 @@ export function getShiftBalance(
   const pendingAmount = Math.max(0, (expectedCents - receivedCents) / 100);
   const overallocatedAmount = Math.max(0, (receivedCents - expectedCents) / 100);
 
-  const isFullyPaid = (receivedCents >= expectedCents && expectedCents > 0) || (expectedCents === 0 && isPerformedShift(shift));
+  const isFullyPaid =
+    (receivedCents >= expectedCents && expectedCents > 0) ||
+    (expectedCents === 0 && isPerformedShift(shift));
   const isPartiallyPaid = receivedCents > 0 && receivedCents < expectedCents;
   const isOverallocated = receivedCents > expectedCents;
 
@@ -276,10 +614,6 @@ export interface ShiftTimeWindow {
   hasExactTimes: boolean;
 }
 
-/**
- * Computes exact time window for a shift, properly handling shifts that cross midnight (e.g. 22:00 to 07:00).
- * If commuteMinutes is provided, extends window start and end.
- */
 export function getShiftTimeWindow(
   shift: MedicalShift,
   includeCommute: boolean = false
@@ -307,7 +641,6 @@ export function getShiftTimeWindow(
   let end = new Date(Date.UTC(y, m - 1, d, endH, endM, 0));
 
   let crossesMidnight = false;
-  // If end time is earlier than or equal to start time, the shift crosses midnight into the next day
   if (end <= start) {
     end = new Date(Date.UTC(y, m - 1, d + 1, endH, endM, 0));
     crossesMidnight = true;
@@ -332,11 +665,6 @@ export interface ShiftOverlapResult {
   overlappingShift?: MedicalShift;
 }
 
-/**
- * Detects if two shifts for the same partner overlap in time.
- * Cancelled and replaced shifts never cause overlap.
- * Crosses midnight correctly and includes commute buffer if requested.
- */
 export function checkShiftOverlap(
   shiftA: MedicalShift,
   shiftB: MedicalShift,
@@ -351,7 +679,6 @@ export function checkShiftOverlap(
 
   if (!windowA || !windowB) return { overlaps: false };
 
-  // If both have exact times, check interval overlap: startA < endB && startB < endA
   if (windowA.hasExactTimes && windowB.hasExactTimes) {
     const isOverlapping = windowA.start < windowB.end && windowB.start < windowA.end;
     if (isOverlapping) {
@@ -368,7 +695,6 @@ export function checkShiftOverlap(
     return { overlaps: false };
   }
 
-  // If either has only date precision, check if same dateWorked
   if (shiftA.dateWorked === shiftB.dateWorked) {
     return {
       overlaps: true,
@@ -394,9 +720,6 @@ export interface ShiftMetricsSummary {
   averageRatePerHour: number;
 }
 
-/**
- * Computes shift metrics for a given month and partner filter based on integer-cent allocations.
- */
 export function calculateShiftMetrics(
   shifts: MedicalShift[],
   monthKey: string,
@@ -405,9 +728,11 @@ export function calculateShiftMetrics(
 ): ShiftMetricsSummary {
   const todayStr = shiftCivilToday();
 
-  const filtered = shifts.filter(s => {
-    const isPartner = !partnerFilter || partnerFilter === 'both' || s.partner === partnerFilter;
-    const isMonth = s.dateWorked.startsWith(monthKey) || s.estimatedPayDate.startsWith(monthKey);
+  const filtered = shifts.filter((s) => {
+    const isPartner =
+      !partnerFilter || partnerFilter === 'both' || s.partner === partnerFilter;
+    const isMonth =
+      s.dateWorked.startsWith(monthKey) || s.estimatedPayDate.startsWith(monthKey);
     return isPartner && isMonth && isActiveShift(s);
   });
 
@@ -421,14 +746,15 @@ export function calculateShiftMetrics(
   let pendingCount = 0;
   let overdueCount = 0;
 
-  filtered.forEach(shift => {
+  filtered.forEach((shift) => {
     if (isPerformedShift(shift)) {
       totalHours += shift.durationHours || 0;
       totalGross += shift.grossAmount || 0;
     }
 
     const isOverdue =
-      shift.status === 'overdue' || (shift.status === 'pending' && shift.estimatedPayDate < todayStr);
+      shift.status === 'overdue' ||
+      (shift.status === 'pending' && shift.estimatedPayDate < todayStr);
 
     const balance = getShiftBalance(shift, shiftIncomeAllocations);
 
@@ -438,21 +764,20 @@ export function calculateShiftMetrics(
 
       if (balance.isFullyPaid) {
         receivedCount++;
-      } else if (isOverdue) {
-        totalOverdue += balance.pendingAmount;
-        overdueCount++;
       } else {
         totalPending += balance.pendingAmount;
         pendingCount++;
+        if (isOverdue) {
+          totalOverdue += balance.pendingAmount;
+          overdueCount++;
+        }
       }
     } else {
-      // Scheduled shift (not yet performed)
+      totalPending += balance.pendingAmount;
+      pendingCount++;
       if (isOverdue) {
         totalOverdue += balance.pendingAmount;
         overdueCount++;
-      } else {
-        totalPending += balance.pendingAmount;
-        pendingCount++;
       }
     }
   });
@@ -486,9 +811,6 @@ export interface HourlyEfficiencyRank {
   badge: string;
 }
 
-/**
- * Computes R$/hora ranking by sector and hospital to answer "qual plantão tá valendo mais a pena"
- */
 export function calculateHourlyYieldRanking(shifts: MedicalShift[]): HourlyEfficiencyRank[] {
   const groups: Record<
     string,
@@ -501,7 +823,7 @@ export function calculateHourlyYieldRanking(shifts: MedicalShift[]): HourlyEffic
     }
   > = {};
 
-  shifts.filter(isPerformedShift).forEach(s => {
+  shifts.filter(isPerformedShift).forEach((s) => {
     const key = `${s.hospitalName}-${s.sector}`;
     if (!groups[key]) {
       groups[key] = {
@@ -518,7 +840,8 @@ export function calculateHourlyYieldRanking(shifts: MedicalShift[]): HourlyEffic
   });
 
   const list: HourlyEfficiencyRank[] = Object.entries(groups).map(([key, data]) => {
-    const ratePerHour = data.totalHours > 0 ? Math.round(data.totalEarned / data.totalHours) : 0;
+    const ratePerHour =
+      data.totalHours > 0 ? Math.round(data.totalEarned / data.totalHours) : 0;
     const sectorConf = SECTOR_CONFIG[data.sector];
 
     let badge = 'Padrão';
@@ -539,7 +862,6 @@ export function calculateHourlyYieldRanking(shifts: MedicalShift[]): HourlyEffic
     };
   });
 
-  // Sort descending by rate per hour
   return list.sort((a, b) => b.ratePerHour - a.ratePerHour);
 }
 
@@ -550,12 +872,6 @@ export interface PacingContext {
   allowResidencyExtraShifts?: boolean;
 }
 
-/**
- * Calculates prescriptive recommendations in 3 levels (Pagar Contas Fixas, Manter Estilo, Acelerar Ganhos).
- * Respects career stage and economic ownership:
- * - Students (graduação / internato): 0 extra shifts recommended.
- * - Residency: 0 extra shifts by default in simulation, unless confirmed (allowResidencyExtraShifts === true).
- */
 export function calculateShiftRecommendations(
   projectedAmount: number,
   fixedExpensesAmount: number,
@@ -565,10 +881,10 @@ export function calculateShiftRecommendations(
   monthLabel: string,
   context?: PacingContext
 ): ShiftPacingRecommendation {
-  const safeShiftValue = Number.isFinite(averageShiftValue) && averageShiftValue > 0 ? averageShiftValue : 0;
+  const safeShiftValue =
+    Number.isFinite(averageShiftValue) && averageShiftValue > 0 ? averageShiftValue : 0;
   const isDryMonth = projectedAmount < fixedExpensesAmount;
 
-  // Career stage verification
   const isStudent = (career?: MedicalCareerProfile) =>
     career?.stage === 'graduacao' || career?.stage === 'internato';
   const isResidency = (career?: MedicalCareerProfile) => career?.stage === 'residencia';
@@ -577,17 +893,22 @@ export function calculateShiftRecommendations(
   if (context?.partnerFilter === 'partner1') {
     if (isStudent(context.partner1Career)) {
       disallowExtraShifts = true;
-    } else if (isResidency(context.partner1Career) && !context.allowResidencyExtraShifts) {
+    } else if (
+      isResidency(context.partner1Career) &&
+      !context.allowResidencyExtraShifts
+    ) {
       disallowExtraShifts = true;
     }
   } else if (context?.partnerFilter === 'partner2') {
     if (isStudent(context.partner2Career)) {
       disallowExtraShifts = true;
-    } else if (isResidency(context.partner2Career) && !context.allowResidencyExtraShifts) {
+    } else if (
+      isResidency(context.partner2Career) &&
+      !context.allowResidencyExtraShifts
+    ) {
       disallowExtraShifts = true;
     }
   } else {
-    // Both partners
     const p1Student = isStudent(context?.partner1Career);
     const p2Student = isStudent(context?.partner2Career);
     const p1Res = isResidency(context?.partner1Career);
@@ -595,27 +916,26 @@ export function calculateShiftRecommendations(
 
     if (p1Student && p2Student) {
       disallowExtraShifts = true;
-    } else if ((p1Student || (p1Res && !context?.allowResidencyExtraShifts)) &&
-               (p2Student || (p2Res && !context?.allowResidencyExtraShifts))) {
+    } else if (
+      (p1Student || (p1Res && !context?.allowResidencyExtraShifts)) &&
+      (p2Student || (p2Res && !context?.allowResidencyExtraShifts))
+    ) {
       disallowExtraShifts = true;
     }
   }
 
-  // Level 1: Linha de Sobrevivência / Blindagem Básica (cobrir contas fixas)
   const gapToFixed = Math.max(0, fixedExpensesAmount - projectedAmount);
   const shiftsToCoverFixed =
     !disallowExtraShifts && gapToFixed > 0 && safeShiftValue > 0
       ? Math.ceil(gapToFixed / safeShiftValue)
       : 0;
 
-  // Level 2: Manutenção do Estilo de Vida Médio
   const gapToLifestyle = Math.max(0, averageIncomeTarget - projectedAmount);
   const shiftsToMaintainLifestyle =
     !disallowExtraShifts && gapToLifestyle > 0 && safeShiftValue > 0
       ? Math.ceil(gapToLifestyle / safeShiftValue)
       : 0;
 
-  // Level 3: Aceleração Patrimonial (+20% sobre a média)
   const accelerateTarget = Math.round(averageIncomeTarget * 1.2);
   const gapToAccelerate = Math.max(0, accelerateTarget - projectedAmount);
   const shiftsToAccelerateGains =
@@ -643,14 +963,11 @@ export interface CashFlowMonthProjection {
   projectedIncome: number;
   alreadyReceived: number;
   fixedExpenses: number;
-  coverageRatio: number; // projectedIncome / fixedExpenses (e.g. 1.2 = 120%)
+  coverageRatio: number;
   shifts: MedicalShift[];
   recommendation: ShiftPacingRecommendation;
 }
 
-/**
- * Projects monthly cash-flow timeline across upcoming months using allocation ledgers.
- */
 export function projectCashFlowTimeline(
   shifts: MedicalShift[],
   fixedExpenses: number,
@@ -664,23 +981,30 @@ export function projectCashFlowTimeline(
   const safeFixed = Number.isFinite(fixedExpenses) ? Math.max(0, fixedExpenses) : 0;
   const safeAvgIncome = Number.isFinite(averageIncome) ? Math.max(0, averageIncome) : 0;
 
-  // Compute overall average shift value from recorded performed shifts
-  const validShifts = shifts.filter(s => isPerformedShift(s) && s.grossAmount > 0);
+  const validShifts = shifts.filter((s) => isPerformedShift(s) && s.grossAmount > 0);
   const avgShiftValue =
     validShifts.length > 0
-      ? Math.round(validShifts.reduce((s, it) => s + it.grossAmount, 0) / validShifts.length)
+      ? Math.round(
+          validShifts.reduce((s, it) => s + it.grossAmount, 0) / validShifts.length
+        )
       : 0;
 
   let currentKey = startMonthKey;
 
   for (let i = 0; i < monthsAhead; i++) {
     const monthShifts = shifts.filter(
-      s => isActiveShift(s) && s.estimatedPayDate && s.estimatedPayDate.startsWith(currentKey)
+      (s) =>
+        isActiveShift(s) &&
+        s.estimatedPayDate &&
+        s.estimatedPayDate.startsWith(currentKey)
     );
     const projectedIncome = monthShifts.reduce((s, it) => s + (it.grossAmount || 0), 0);
     const alreadyReceived = monthShifts
-      .filter(s => isPerformedShift(s))
-      .reduce((s, it) => s + getShiftBalance(it, shiftIncomeAllocations).receivedAmount, 0);
+      .filter((s) => isPerformedShift(s))
+      .reduce(
+        (s, it) => s + getShiftBalance(it, shiftIncomeAllocations).receivedAmount,
+        0
+      );
 
     const coverageRatio = safeFixed > 0 ? projectedIncome / safeFixed : 1;
     const label = formatMonthYear(currentKey);
@@ -712,18 +1036,17 @@ export function projectCashFlowTimeline(
   return timeline;
 }
 
-/**
- * Reconciles Open Finance / bank credits with shift.
- * Rescues, caixinha redemptions, and internal transfers are strictly excluded.
- */
 export function findMatchingBankIncomesForShift(
   shift: MedicalShift,
   incomes: IncomeItem[],
   rules: HospitalIncomeMappingRule[] = []
-): { exactMatches: IncomeItem[]; probableMatches: IncomeItem[]; matchingRule?: HospitalIncomeMappingRule } {
-  // Find rule matching this hospital
+): {
+  exactMatches: IncomeItem[];
+  probableMatches: IncomeItem[];
+  matchingRule?: HospitalIncomeMappingRule;
+} {
   const matchingRule = rules.find(
-    r =>
+    (r) =>
       r.hospitalName.toLowerCase() === shift.hospitalName.toLowerCase() ||
       shift.hospitalName.toLowerCase().includes(r.hospitalName.toLowerCase())
   );
@@ -732,10 +1055,9 @@ export function findMatchingBankIncomesForShift(
   const probableMatches: IncomeItem[] = [];
   const expectedAmount = getShiftExpectedAmount(shift);
 
-  incomes.forEach(inc => {
+  incomes.forEach((inc) => {
     if (inc.recipient !== shift.partner) return;
 
-    // Resgates, investimentos ou transferências internas NÃO são renda de plantão
     if (
       inc.classification === 'resgate_principal' ||
       inc.classification === 'principal_redemption' ||
@@ -755,15 +1077,16 @@ export function findMatchingBankIncomesForShift(
     }
 
     const amountDiff = Math.abs(inc.amount - expectedAmount);
-    const isAmountClose = amountDiff <= 50; // allow small withholding tax variation
+    const isAmountClose = amountDiff <= 50;
 
     const descUpper = (inc.description || '').toUpperCase();
-    const hasRuleKeyword = matchingRule && descUpper.includes(matchingRule.keywordPattern.toUpperCase());
+    const hasRuleKeyword =
+      matchingRule && descUpper.includes(matchingRule.keywordPattern.toUpperCase());
     const hasHospitalWord = shift.hospitalName
       .toUpperCase()
       .split(' ')
-      .filter(w => w.length > 3)
-      .some(w => descUpper.includes(w));
+      .filter((w) => w.length > 3)
+      .some((w) => descUpper.includes(w));
 
     if (isAmountClose && (hasRuleKeyword || hasHospitalWord)) {
       exactMatches.push(inc);
@@ -779,9 +1102,6 @@ export function findMatchingBankIncomesForShift(
   };
 }
 
-/**
- * Generates sample seed shifts for realistic initial experience
- */
 export function getSampleMedicalShifts(currentMonthKey: string): MedicalShift[] {
   const [year, month] = currentMonthKey.split('-').map(Number);
   const prevMonth = month === 1 ? 12 : month - 1;
@@ -793,7 +1113,7 @@ export function getSampleMedicalShifts(currentMonthKey: string): MedicalShift[] 
       id: 'shift-sample-1',
       partner: 'partner1',
       title: 'Plantão UTI Geral 12h',
-      hospitalName: 'Hospital Copa D\'Or',
+      hospitalName: "Hospital Copa D'Or",
       sector: 'uti',
       contractType: 'pj_privado',
       dateWorked: `${currentMonthKey}-12`,
@@ -852,7 +1172,7 @@ export function getSampleMedicalShifts(currentMonthKey: string): MedicalShift[] 
       id: 'shift-sample-5',
       partner: 'partner1',
       title: 'Visita de Enfermaria 6h',
-      hospitalName: 'Hospital Quinta D\'Or',
+      hospitalName: "Hospital Quinta D'Or",
       sector: 'enfermaria',
       contractType: 'pj_privado',
       dateWorked: `${currentMonthKey}-04`,
@@ -864,3 +1184,36 @@ export function getSampleMedicalShifts(currentMonthKey: string): MedicalShift[] 
     },
   ];
 }
+
+export function mapLegacyShiftToRecord(
+  shift: MedicalShift,
+  doctorUid: string,
+  defaultShiftTaxRate: number = 0
+): MedicalShiftRecord {
+  const status: MedicalShiftStatusV2 =
+    shift.status === 'received'
+      ? 'paid'
+      : shift.executionStatus === 'scheduled'
+        ? 'scheduled'
+        : 'pending_payment';
+
+  const grossAmount = roundMoney(Math.max(0.01, shift.grossAmount || 0));
+  const netAmount =
+    shift.netAmount !== undefined && Number.isFinite(shift.netAmount)
+      ? Math.min(grossAmount, Math.max(0.01, roundMoney(shift.netAmount)))
+      : calculateShiftNetAmount(grossAmount, defaultShiftTaxRate);
+
+  return {
+    id: shift.id,
+    doctorUid,
+    institution: shift.hospitalName || shift.title || 'Hospital',
+    shiftDate: shift.dateWorked,
+    hours: Math.max(1, shift.durationHours || 12),
+    grossAmount,
+    netAmount,
+    status,
+    expectedPayDate: shift.estimatedPayDate || shift.dateWorked,
+    paidAt: status === 'paid' ? (shift.actualPayDate || shift.estimatedPayDate || shift.dateWorked) : null,
+  };
+}
+

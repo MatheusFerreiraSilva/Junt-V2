@@ -99,7 +99,22 @@ import {
   WithdrawalPurposePartition,
   ReinforcementProvenanceRef,
   CategoryReinforcementSummary,
+  HouseholdConfig,
+  MedicalShiftRecord,
+  TransactionBucket,
 } from '../types/finance';
+import {
+  resolveHouseholdConfig,
+} from '../domain/waterfallEngine';
+import {
+  confirmStagedTransactionRoute,
+  type ConfirmStagedTransactionResult,
+} from '../lib/v23Persistence';
+import type {
+  StagedCsvTransaction,
+  TriageDestination,
+} from '../utils/statementImport';
+import { mapLegacyShiftToRecord } from '../utils/shiftsEngine';
 import {
   DEFAULT_PUSH_SETTINGS,
   checkAndTriggerScheduledPushNotifications,
@@ -867,6 +882,16 @@ export interface FinanceContextType {
   deleteShiftPreset: (id: string) => void;
   addHospitalMappingRule: (rule: Omit<HospitalIncomeMappingRule, 'id' | 'createdAt'>) => void;
   removeHospitalMappingRule: (id: string) => void;
+  householdConfig: HouseholdConfig;
+  v23MedicalShifts: MedicalShiftRecord[];
+  v23ExistingHashes: string[];
+  confirmCsvTriage: (params: {
+    staged: StagedCsvTransaction;
+    destination: TriageDestination;
+    bucket?: TransactionBucket;
+    sharedCategory?: string;
+    reconcileShiftId?: string;
+  }) => Promise<ConfirmStagedTransactionResult>;
 
   // Auth & Cloud Sync & Couple Fusion
   currentUser: User | null;
@@ -2571,35 +2596,26 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
   };
 
   const syncPluggyData = async () => {
-    const userId = auth.currentUser?.uid;
-    const itemIds = [...new Set((state.pluggyAccounts || []).filter(a => a.appOwner === userProfile?.partnerRole).map(a => a.itemId).filter(Boolean))];
-    if (!itemIds.length) throw new Error('Conecte uma instituição antes de sincronizar.');
+    // Etapa 3 (Protocolo A.0): Sincronizacao bancaria 100% offline via importacao CSV client-side.
     setIsSyncingBanks(true);
     try {
-      for (const itemId of itemIds) {
-        const result = await authenticatedApi<{ source: string; simulated: boolean; transactions: Array<{ id: string; accountId: string; amount: number; date: string; description: string; type: string }> }>('/api/bank-sync/fetch', { itemId });
-        if (result.simulated || result.source !== 'pluggy') throw new Error('A sincronização real está indisponível.');
-        if (auth.currentUser?.uid !== userId) return;
-        setState(prev => {
-          const imported: BankImportedTransaction[] = [...(prev.bankImportedTransactions || [])];
-          for (const transaction of result.transactions || []) {
-            if (!transaction.id || !transaction.accountId || !Number.isFinite(transaction.amount)) continue;
-            const id = transaction.id;
-            if (imported.some(e => e.id === id) || prev.expenses.some(e => e.id === id) || prev.incomes.some(i => i.id === id)) continue;
-            const account = prev.pluggyAccounts.find(a => a.accountId === transaction.accountId);
-            const owner: PaidBy = account?.owner || userProfile?.partnerRole || 'both';
-            const amount = Math.round(Math.abs(transaction.amount) * 100) / 100;
-            const date = transaction.date.slice(0, 10);
-            if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || amount <= 0) continue;
-            imported.push({ id, itemId, accountId: transaction.accountId, amount, date, description: transaction.description || 'Lançamento bancário', direction: transaction.type === 'CREDIT' ? 'credit' : 'debit', owner, status: 'pending' });
-          }
-          return { ...prev, bankImportedTransactions: imported, pluggyAccounts: prev.pluggyAccounts.map(a => a.itemId === itemId ? { ...a, lastSynced: new Date().toISOString(), status: 'connected' as const } : a) };
-        });
-      }
-    } catch (error) {
-      setState(prev => ({ ...prev, pluggyAccounts: prev.pluggyAccounts.map(a => itemIds.includes(a.itemId) ? { ...a, status: 'error' as const } : a) }));
-      throw error;
-    } finally { setIsSyncingBanks(false); }
+      setState(prev => ({
+        ...prev,
+        notifications: [
+          {
+            id: `csv-import-hint:${Date.now()}`,
+            title: 'Importação CSV offline ativa',
+            message: 'Use o importador de extrato CSV no botão Importar Extrato para processar lançamentos localmente no navegador.',
+            timestamp: 'Agora',
+            type: 'info' as const,
+            isRead: false,
+          },
+          ...prev.notifications.filter(n => !n.id.startsWith('csv-import-hint:')),
+        ],
+      }));
+    } finally {
+      setIsSyncingBanks(false);
+    }
   };
 
   const importStatement = (items: BankImportedTransaction[]) => setState(prev => {
@@ -4472,6 +4488,198 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
       ...prev,
       hospitalMappingRules: (prev.hospitalMappingRules || DEFAULT_HOSPITAL_MAPPING_RULES).filter(r => r.id !== id),
     }));
+  };
+
+  const [v23ConfirmedHashes, setV23ConfirmedHashes] = useState<string[]>([]);
+
+  const householdConfig = useMemo<HouseholdConfig>(() => {
+    const p1TaxRate = (state.profile.partner1Fiscal?.cnpjTaxRate ?? 0) / 100;
+    const p2TaxRate = (state.profile.partner2Fiscal?.cnpjTaxRate ?? 0) / 100;
+    const inferredShiftTaxRate = p1TaxRate > 0 ? p1TaxRate : p2TaxRate > 0 ? p2TaxRate : 0;
+    const memberTaxIds = [
+      state.profile.partner1Fiscal?.cpfTaxNumber,
+      state.profile.partner2Fiscal?.cpfTaxNumber,
+      state.profile.partner1Name,
+      state.profile.partner2Name,
+    ]
+      .map(v => (v || '').trim())
+      .filter(v => v.length >= 4 && v !== 'Aguardando Par...');
+
+    return resolveHouseholdConfig({
+      id: coupleAccount?.id,
+      memberUids: [currentUser?.uid || 'local-user'],
+      memberTaxIds,
+      defaultShiftTaxRate: inferredShiftTaxRate,
+    });
+  }, [
+    coupleAccount?.id,
+    currentUser?.uid,
+    state.profile.partner1Fiscal?.cnpjTaxRate,
+    state.profile.partner1Fiscal?.cpfTaxNumber,
+    state.profile.partner2Fiscal?.cnpjTaxRate,
+    state.profile.partner2Fiscal?.cpfTaxNumber,
+    state.profile.partner1Name,
+    state.profile.partner2Name,
+  ]);
+
+  const v23MedicalShifts = useMemo<MedicalShiftRecord[]>(() => {
+    const uid = currentUser?.uid || 'local-user';
+    return (state.medicalShifts || []).map(s =>
+      mapLegacyShiftToRecord(s, uid, householdConfig.defaultShiftTaxRate)
+    );
+  }, [state.medicalShifts, currentUser?.uid, householdConfig.defaultShiftTaxRate]);
+
+  const v23ExistingHashes = useMemo<string[]>(() => {
+    const hashes = new Set<string>(v23ConfirmedHashes);
+    for (const exp of state.expenses) {
+      if (exp.operationId?.startsWith('csv-hash:')) {
+        hashes.add(exp.operationId.slice('csv-hash:'.length));
+      }
+    }
+    for (const inst of state.installments) {
+      if (inst.requestId?.startsWith('csv-hash:')) {
+        hashes.add(inst.requestId.slice('csv-hash:'.length));
+      }
+    }
+    return Array.from(hashes);
+  }, [v23ConfirmedHashes, state.expenses, state.installments]);
+
+  const confirmCsvTriage = async (params: {
+    staged: StagedCsvTransaction;
+    destination: TriageDestination;
+    bucket?: TransactionBucket;
+    sharedCategory?: string;
+    reconcileShiftId?: string;
+  }): Promise<ConfirmStagedTransactionResult> => {
+    const uid = currentUser?.uid || 'local-user';
+    const householdId = coupleAccount?.id;
+    const bucketToCategory: Record<TransactionBucket, CategoryKey> = {
+      housing: 'moradia',
+      fixed_essential: 'protecao',
+      fixed_cancelable: 'lazer',
+      groceries: 'comida',
+      routine: 'lazer',
+      buffer: 'protecao',
+    };
+
+    let result: ConfirmStagedTransactionResult;
+
+    if (currentUser?.uid && (params.destination === 'solo_allowance' || householdId)) {
+      result = await confirmStagedTransactionRoute({
+        staged: params.staged,
+        destination: params.destination,
+        uid,
+        householdId,
+        bucket: params.bucket,
+        sharedCategory: params.sharedCategory,
+        householdConfig,
+        reconcileShiftId: params.reconcileShiftId,
+        existingShifts: v23MedicalShifts,
+      });
+    } else {
+      // Modo offline/local-only: aplica validacoes de teto e garante blindagem (zero-escrita em colecao do casal para solo_allowance)
+      result = await confirmStagedTransactionRoute({
+        staged: params.staged,
+        destination: params.destination,
+        uid,
+        householdId: householdId || 'local-household',
+        bucket: params.bucket,
+        sharedCategory: params.sharedCategory,
+        householdConfig,
+        reconcileShiftId: params.reconcileShiftId,
+        existingShifts: v23MedicalShifts,
+        writer: {
+          getDocData: async () => null,
+          setDocData: async () => {},
+        },
+      });
+    }
+
+    setV23ConfirmedHashes(prev =>
+      prev.includes(params.staged.importHash) ? prev : [...prev, params.staged.importHash]
+    );
+
+    if (params.destination === 'house_routine') {
+      const chosenBucket = params.bucket || params.staged.suggestedBucket || 'routine';
+      const mappedCat = bucketToCategory[chosenBucket] || 'lazer';
+      const txId = `csv-tx-${params.staged.importHash.slice(0, 16)}`;
+      setState(prev => {
+        const nextExpenses = prev.expenses.some(e => e.id === txId)
+          ? prev.expenses
+          : [
+              {
+                id: txId,
+                description: params.staged.installment?.cleanTitle || params.staged.description,
+                amount: roundMoney(params.staged.amount),
+                category: mappedCat,
+                date: params.staged.date,
+                paidBy: 'both' as const,
+                assignedTo: 'couple' as const,
+                triageDone: true,
+                operationId: `csv-hash:${params.staged.importHash}`,
+                bankName: params.staged.accountLabel,
+              },
+              ...prev.expenses,
+            ];
+
+        const nextInstallments = [...prev.installments];
+        if (params.staged.installment) {
+          const planId = `csv-plan-${params.staged.importHash.slice(0, 16)}`;
+          if (!nextInstallments.some(i => i.id === planId)) {
+            nextInstallments.unshift({
+              id: planId,
+              title: params.staged.installment.cleanTitle,
+              category: mappedCat,
+              type: 'card_consumption',
+              totalAmount: roundMoney(
+                params.staged.amount * params.staged.installment.totalInstallments
+              ),
+              installmentsCount: params.staged.installment.totalInstallments,
+              installmentAmount: roundMoney(params.staged.amount),
+              startMonth: params.staged.installment.draft.startCycleId.replace('_', '-'),
+              paidInstallmentsCount: params.staged.installment.currentInstallment,
+              active: true,
+              paidBy: 'both',
+              requestId: `csv-hash:${params.staged.importHash}`,
+            });
+          }
+        }
+
+        return {
+          ...prev,
+          expenses: nextExpenses,
+          installments: nextInstallments,
+        };
+      });
+    } else if (params.destination === 'shared_allowance') {
+      const txId = `csv-shared-${params.staged.importHash.slice(0, 16)}`;
+      setState(prev => {
+        if (prev.expenses.some(e => e.id === txId)) return prev;
+        return {
+          ...prev,
+          expenses: [
+            {
+              id: txId,
+              description: `${params.staged.description} (Mesada 50/50)`,
+              amount: roundMoney(params.staged.amount),
+              category: 'lazer',
+              date: params.staged.date,
+              paidBy: 'both',
+              assignedTo: 'couple',
+              fundingSource: 'personal_allowance',
+              isExcludedFromMonthlyBudget: true,
+              triageDone: true,
+              operationId: `csv-hash:${params.staged.importHash}`,
+            },
+            ...prev.expenses,
+          ],
+        };
+      });
+    } else if (params.destination === 'internal' && params.reconcileShiftId) {
+      markShiftAsReceivedDirectly(params.reconcileShiftId, params.staged.date, true);
+    }
+
+    return result;
   };
 
   const updateAlertRule = (ruleOrId: string | SpendingAlertRule, updates?: Partial<SpendingAlertRule>) => {
@@ -7025,6 +7233,10 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
         deleteShiftPreset,
         addHospitalMappingRule,
         removeHospitalMappingRule,
+        householdConfig,
+        v23MedicalShifts,
+        v23ExistingHashes,
+        confirmCsvTriage,
       }}
     >
       {isHydratingCloud ? <main className="min-h-screen flex items-center justify-center p-6 bg-stone-50"><section className="max-w-md text-center" role="status" aria-live="polite"><h1 className="text-xl font-semibold text-stone-900">{cloudLoadError ? 'Vamos recuperar sua conexão' : 'Abrindo o plano de vocês'}</h1><p className="mt-3 text-stone-600">{cloudLoadError || 'Carregando os registros desta conta com segurança.'}</p>{cloudLoadError && <button className="mt-5 rounded-xl bg-emerald-800 px-5 py-3 text-white" onClick={() => window.dispatchEvent(new Event('junto-membership-changed'))}>Tentar novamente</button>}<button className="mt-5 ml-3 px-4 py-3 text-stone-600" onClick={() => void signOutUser()}>Sair</button></section></main> : children}
