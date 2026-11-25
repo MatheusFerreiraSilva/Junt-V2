@@ -1,0 +1,8 @@
+{
+  "name": "Remix Nosso App Financeiro",
+  "description": "O painel de controle financeiro do casal simples, visual e acolhedor.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

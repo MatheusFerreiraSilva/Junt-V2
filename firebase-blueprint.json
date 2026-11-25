@@ -1,0 +1,339 @@
+{
+  "entities": {
+    "Household": {
+      "title": "Household",
+      "description": "Global v2.3 household configuration for the couple under Caixa Unico and 60/30/10 cascade",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "memberUids": {
+          "type": "array",
+          "description": "Array of 2 member UIDs [uidA, uidB]"
+        },
+        "memberTaxIds": {
+          "type": "array",
+          "description": "CPFs/names of both members for automatic internal Pix filtering"
+        },
+        "cycleStartDay": { "type": "number", "description": "Day of month when budget cycle starts (default 1)" },
+        "mandatoryGoalRate": { "type": "number", "description": "Mandatory top-of-cascade contribution rate (default 0.10)" },
+        "housingCapRate": { "type": "number", "description": "Cap rate for Moradia Completa (default 0.30)" },
+        "structureCapRate": { "type": "number", "description": "Global cap rate for Estrutura de Vida (default 0.60)" },
+        "installmentCapMin": { "type": "number", "description": "Minimum installment cap rate (0.10)" },
+        "installmentCapMax": { "type": "number", "description": "Maximum installment cap rate (0.20)" },
+        "installmentCapTarget": { "type": "number", "description": "Target installment cap rate (0.15)" },
+        "allowanceFloor": { "type": "number", "description": "Guaranteed minimum individual allowance floor" },
+        "allowanceCap": { "type": "number", "description": "Maximum individual allowance cap" },
+        "shieldFloorMonths": { "type": "number", "description": "Untouchable emergency reserve floor in months (default 4)" },
+        "shieldTargetMonths": { "type": "number", "description": "Full emergency reserve target in months (default 10)" },
+        "defaultShiftTaxRate": { "type": "number", "description": "Default medical shift tax rate (0.00 in graduation, configurable for PJ/RPA)" },
+        "goalAllocationRules": {
+          "type": "array",
+          "description": "Custom distribution rules for multiple fixed goal contributions"
+        }
+      },
+      "required": [
+        "memberUids",
+        "memberTaxIds",
+        "cycleStartDay",
+        "mandatoryGoalRate",
+        "housingCapRate",
+        "structureCapRate",
+        "installmentCapMin",
+        "installmentCapMax",
+        "installmentCapTarget",
+        "allowanceFloor",
+        "allowanceCap",
+        "shieldFloorMonths",
+        "shieldTargetMonths",
+        "defaultShiftTaxRate",
+        "goalAllocationRules"
+      ]
+    },
+    "BudgetCycle": {
+      "title": "BudgetCycle",
+      "description": "Consolidated monthly cash cycle (replaces legacy partner settlement/closing models)",
+      "type": "object",
+      "properties": {
+        "newNetIncome": { "type": "number", "description": "Only settled incomes + paid medical shifts" },
+        "previousMonthCarryOver": { "type": "number", "description": "closingSurplus carried over from previous cycle" },
+        "totalAvailableCash": { "type": "number", "description": "newNetIncome + previousMonthCarryOver" },
+        "mandatoryGoalAmount": { "type": "number", "description": "10% of newNetIncome allocated at top of cascade" },
+        "housingTotal": { "type": "number", "description": "Rent + Condo + IPTU + Water + Electricity + Gas + Internet" },
+        "essentialFixedTotal": { "type": "number", "description": "Health, gym, PJ/CRM (included in Emergency Shield base)" },
+        "cancelableFixedTotal": { "type": "number", "description": "Streamings and cancelable subscriptions (in 60% monthly cap, outside Shield base)" },
+        "installmentsTotal": { "type": "number", "description": "Sum of couple installment plans in this cycle" },
+        "groceriesBudget": { "type": "number", "description": "Monthly groceries budget (Compra do Mes)" },
+        "routineBudget": { "type": "number", "description": "Daily routine budget (transit, weekly fuel, work/uni rideshare, between-shift meals)" },
+        "unexpectedBufferLimit": { "type": "number" },
+        "unexpectedBufferSpent": { "type": "number" },
+        "unlockedAllowanceA": { "type": "number", "description": "Partner A unlocked allowance (Wave 1 + Wave 2)" },
+        "unlockedAllowanceB": { "type": "number", "description": "Partner B unlocked allowance (Wave 1 + Wave 2)" },
+        "boostTransfers": {
+          "type": "array",
+          "description": "Silent boost transfers { fromUid, toUid, amount, createdAt } with no reason field and no debt"
+        },
+        "closingSurplus": { "type": "number", "description": "Actual common cash surplus at cycle closing" },
+        "surplusRouting": { "type": "string", "enum": ["carry_over", "goals"] }
+      },
+      "required": [
+        "newNetIncome",
+        "previousMonthCarryOver",
+        "totalAvailableCash",
+        "mandatoryGoalAmount",
+        "housingTotal",
+        "essentialFixedTotal",
+        "cancelableFixedTotal",
+        "installmentsTotal",
+        "groceriesBudget",
+        "routineBudget",
+        "unexpectedBufferLimit",
+        "unexpectedBufferSpent",
+        "unlockedAllowanceA",
+        "unlockedAllowanceB",
+        "boostTransfers",
+        "closingSurplus",
+        "surplusRouting"
+      ]
+    },
+    "HouseholdTransaction": {
+      "title": "HouseholdTransaction",
+      "description": "Common household expense in Estrutura de Vida (no per-expense split or debt)",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "maxLength": 200 },
+        "bucket": {
+          "type": "string",
+          "enum": ["housing", "fixed_essential", "fixed_cancelable", "groceries", "routine", "buffer"]
+        },
+        "amount": { "type": "number" },
+        "date": { "type": "string", "format": "date-time", "maxLength": 64 },
+        "paidByUid": { "type": "string", "maxLength": 128, "description": "Historical payer UID only, zero debt effect" },
+        "cycleId": { "type": "string", "pattern": "^[0-9]{4}_[0-9]{2}$" },
+        "importHash": { "type": "string", "maxLength": 256, "description": "Nullable deduplication hash" }
+      },
+      "required": ["title", "bucket", "amount", "date", "paidByUid", "cycleId"]
+    },
+    "SharedAllowanceExpense": {
+      "title": "SharedAllowanceExpense",
+      "description": "Dos Dois expense: debits 50% from Partner A wallet and 50% from Partner B wallet without exposing private balances",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "maxLength": 200 },
+        "category": { "type": "string", "maxLength": 80 },
+        "totalAmount": { "type": "number" },
+        "splitPerPartner": { "type": "number", "description": "Must equal totalAmount / 2" },
+        "paidByUid": { "type": "string", "maxLength": 128 },
+        "date": { "type": "string", "format": "date-time", "maxLength": 64 },
+        "cycleId": { "type": "string", "pattern": "^[0-9]{4}_[0-9]{2}$" }
+      },
+      "required": ["title", "category", "totalAmount", "splitPerPartner", "paidByUid", "date", "cycleId"]
+    },
+    "InstallmentPlan": {
+      "title": "InstallmentPlan",
+      "description": "Future installment projection for the couple",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "maxLength": 200 },
+        "installmentAmount": { "type": "number" },
+        "currentInstallment": { "type": "number" },
+        "totalInstallments": { "type": "number" },
+        "startCycleId": { "type": "string", "pattern": "^[0-9]{4}_[0-9]{2}$" },
+        "endCycleId": { "type": "string", "pattern": "^[0-9]{4}_[0-9]{2}$" },
+        "importHash": { "type": "string", "maxLength": 256 }
+      },
+      "required": [
+        "title",
+        "installmentAmount",
+        "currentInstallment",
+        "totalInstallments",
+        "startCycleId",
+        "endCycleId"
+      ]
+    },
+    "MedicalShift": {
+      "title": "MedicalShift",
+      "description": "Medical shift record separating competence (shiftDate) from cash realization (paidAt)",
+      "type": "object",
+      "properties": {
+        "doctorUid": { "type": "string", "maxLength": 128 },
+        "institution": { "type": "string", "maxLength": 160 },
+        "shiftDate": { "type": "string", "format": "date", "maxLength": 64 },
+        "hours": { "type": "number" },
+        "grossAmount": { "type": "number" },
+        "netAmount": { "type": "number" },
+        "status": { "type": "string", "enum": ["scheduled", "pending_payment", "paid"] },
+        "expectedPayDate": { "type": "string", "format": "date", "maxLength": 64 },
+        "paidAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": [
+        "doctorUid",
+        "institution",
+        "shiftDate",
+        "hours",
+        "grossAmount",
+        "netAmount",
+        "status",
+        "expectedPayDate"
+      ]
+    },
+    "Goal": {
+      "title": "Goal",
+      "description": "Three-pillar investment goal (Shield, Dreams, Wealth)",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "maxLength": 160 },
+        "pillar": { "type": "string", "enum": ["shield", "dreams", "wealth"] },
+        "targetAmount": { "type": "number" },
+        "currentAmount": { "type": "number" },
+        "deadline": { "type": "string", "maxLength": 64 },
+        "autoAllocateWeight": { "type": "number" }
+      },
+      "required": ["title", "pillar", "targetAmount", "currentAmount", "autoAllocateWeight"]
+    },
+    "GoalContribution": {
+      "title": "GoalContribution",
+      "description": "Goal contribution ledger entry (10% mandatory, cycle surplus, or anonymous partner allowance sweep)",
+      "type": "object",
+      "properties": {
+        "goalId": { "type": "string", "maxLength": 128 },
+        "amount": { "type": "number" },
+        "source": {
+          "type": "string",
+          "enum": ["mandatory_10_percent", "cycle_surplus", "partner_allowance_sweep"]
+        },
+        "contributorUid": { "type": "string", "maxLength": 128 },
+        "date": { "type": "string", "format": "date-time", "maxLength": 64 },
+        "cycleId": { "type": "string", "pattern": "^[0-9]{4}_[0-9]{2}$" }
+      },
+      "required": ["goalId", "amount", "source", "date", "cycleId"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Private user account profile isolated by owner UID",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "email": { "type": "string", "maxLength": 320 },
+        "displayName": { "type": "string", "maxLength": 80 },
+        "householdId": { "type": "string", "maxLength": 128 }
+      },
+      "required": ["uid"]
+    },
+    "AllowanceWallet": {
+      "title": "AllowanceWallet",
+      "description": "Private zero-surveillance monthly allowance wallet for a single user",
+      "type": "object",
+      "properties": {
+        "rolloverFromPrevious": { "type": "number" },
+        "monthlyAllocation": { "type": "number" },
+        "boostsNet": { "type": "number" },
+        "soloSpent": { "type": "number" },
+        "jointAllowanceShareSpent": { "type": "number" },
+        "sweptToSharedGoals": { "type": "number" },
+        "closingBalance": { "type": "number" }
+      },
+      "required": [
+        "rolloverFromPrevious",
+        "monthlyAllocation",
+        "boostsNet",
+        "soloSpent",
+        "jointAllowanceShareSpent",
+        "sweptToSharedGoals",
+        "closingBalance"
+      ]
+    },
+    "AllowanceExpense": {
+      "title": "AllowanceExpense",
+      "description": "Private solo allowance expense (So Minha), strictly invisible to the partner",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "maxLength": 200 },
+        "amount": { "type": "number" },
+        "installmentInfo": {
+          "type": "object",
+          "description": "Nullable installment info limited to 50% of allowanceFloor"
+        },
+        "date": { "type": "string", "format": "date-time", "maxLength": 64 },
+        "cycleId": { "type": "string", "pattern": "^[0-9]{4}_[0-9]{2}$" }
+      },
+      "required": ["title", "amount", "date", "cycleId"]
+    },
+    "Avatar": {
+      "title": "Avatar",
+      "description": "Owner-bound avatar configuration",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "revision": { "type": "number" },
+        "config": { "type": "object" }
+      },
+      "required": ["ownerUid", "revision", "config"]
+    },
+    "AccountPreferences": {
+      "title": "AccountPreferences",
+      "description": "Private appearance preferences isolated by owner UID",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "version": { "type": "number" },
+        "revision": { "type": "number" },
+        "preferences": { "type": "object" }
+      },
+      "required": ["ownerUid", "version", "revision", "preferences"]
+    }
+  },
+  "firestore": {
+    "/households/{householdId}": {
+      "schema": "Household",
+      "description": "Global couple household rules, caps, floors and member UIDs"
+    },
+    "/households/{householdId}/budget_cycles/{yyyy_mm}": {
+      "schema": "BudgetCycle",
+      "description": "Consolidated monthly budget cycle and dual-ledger surplus"
+    },
+    "/households/{householdId}/transactions/{txId}": {
+      "schema": "HouseholdTransaction",
+      "description": "Common household expenses across the 6 Estrutura de Vida buckets"
+    },
+    "/households/{householdId}/shared_allowance_expenses/{txId}": {
+      "schema": "SharedAllowanceExpense",
+      "description": "Shared Dos Dois allowance expenses (50/50 split from private wallets without exposing balances)"
+    },
+    "/households/{householdId}/installment_plans/{planId}": {
+      "schema": "InstallmentPlan",
+      "description": "Projected couple installment plans"
+    },
+    "/households/{householdId}/shifts/{shiftId}": {
+      "schema": "MedicalShift",
+      "description": "Medical shifts with competence vs cash realization tracking"
+    },
+    "/households/{householdId}/goals/{goalId}": {
+      "schema": "Goal",
+      "description": "Investment goals organized into Shield, Dreams, and Wealth pillars"
+    },
+    "/households/{householdId}/goal_contributions/{contribId}": {
+      "schema": "GoalContribution",
+      "description": "Goal contribution ledger including mandatory 10%, cycle surplus, and partner allowance sweeps"
+    },
+    "/users/{uid}": {
+      "schema": "UserProfile",
+      "description": "Private user profile"
+    },
+    "/users/{uid}/allowance_wallets/{yyyy_mm}": {
+      "schema": "AllowanceWallet",
+      "description": "Private monthly allowance wallet (zero surveillance — strictly owner-only)"
+    },
+    "/users/{uid}/allowance_expenses/{txId}": {
+      "schema": "AllowanceExpense",
+      "description": "Private solo allowance expenses (zero surveillance — strictly owner-only)"
+    },
+    "/avatars/{uid}": {
+      "schema": "Avatar",
+      "description": "User avatar recipe"
+    },
+    "/accountPreferences/{uid}": {
+      "schema": "AccountPreferences",
+      "description": "Private visual theme preferences"
+    }
+  }
+}

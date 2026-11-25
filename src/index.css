@@ -1,0 +1,621 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --app-bg-canvas: #FAF7F2;
+  --app-bg-canvas-subtle: #F8F4EC;
+  --app-charcoal: #111318;
+  --app-charcoal-card: #181B22;
+
+  /* Pastel Bento Palette */
+  --bento-lavender: #D8C7FF;
+  --bento-lavender-subtle: #F3EFFF;
+  --bento-ochre: #FFC875;
+  --bento-ochre-subtle: #FFF6E5;
+  --bento-skyblue: #A6D8FF;
+  --bento-skyblue-subtle: #EEF7FF;
+  --bento-pink: #FFC2E2;
+  --bento-pink-subtle: #FFF0F7;
+  --bento-sage: #B8E0B0;
+  --bento-sage-subtle: #F0F8EE;
+
+  /* Accent Fallbacks */
+  --app-accent-primary: #111318;
+  --app-accent-hover: #222630;
+  --app-accent-light: #F0F8EE;
+  --app-accent-text: #111318;
+  --app-accent-border: #E8E2D8;
+  --app-accent-surface: #FAF7F2;
+  --app-accent-gradient-from: #111318;
+  --app-accent-gradient-to: #2B303C;
+  --app-accent-glow: rgba(17, 19, 24, 0.12);
+  --app-accent-subtle: rgba(17, 19, 24, 0.04);
+}
+
+.dark {
+  --app-bg-canvas: #0E1015;
+  --app-bg-canvas-subtle: #14171E;
+  --app-charcoal: #FAF7F2;
+  --app-charcoal-card: #161920;
+
+  --bento-lavender-subtle: rgba(216, 199, 255, 0.12);
+  --bento-ochre-subtle: rgba(255, 200, 117, 0.12);
+  --bento-skyblue-subtle: rgba(166, 216, 255, 0.12);
+  --bento-pink-subtle: rgba(255, 194, 226, 0.12);
+  --bento-sage-subtle: rgba(184, 224, 176, 0.12);
+}
+
+@layer base {
+  body {
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    background-color: var(--app-bg-canvas);
+    color: #111318;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  .dark body {
+    background-color: var(--app-bg-canvas);
+    color: #F8FAFC;
+  }
+  h1, h2, h3, h4, .font-display {
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    letter-spacing: -0.02em;
+    font-weight: 700;
+  }
+}
+
+/* Dynamic Accent Theme Classes */
+.btn-primary-accent {
+  background-color: var(--app-accent-primary, #059669) !important;
+  color: #ffffff !important;
+  transition: all 0.15s ease-in-out;
+}
+
+.btn-primary-accent:hover {
+  background-color: var(--app-accent-hover, #047857) !important;
+  filter: brightness(1.05);
+}
+
+.btn-primary-accent:active {
+  transform: scale(0.97);
+}
+
+.bg-accent-primary {
+  background-color: var(--app-accent-primary, #059669) !important;
+}
+
+.bg-accent-light {
+  background-color: var(--app-accent-light, #ecfdf5) !important;
+}
+
+.bg-accent-surface {
+  background-color: var(--app-accent-surface, #ecfdf5) !important;
+}
+
+.bg-accent-subtle {
+  background-color: var(--app-accent-subtle, rgba(5, 150, 105, 0.08)) !important;
+}
+
+.text-accent-primary {
+  color: var(--app-accent-primary, #059669) !important;
+}
+
+.text-accent-text {
+  color: var(--app-accent-text, #047857) !important;
+}
+
+.text-accent-themed {
+  color: var(--app-accent-text, #047857) !important;
+}
+
+.border-accent-primary {
+  border-color: var(--app-accent-primary, #059669) !important;
+}
+
+.border-accent-border {
+  border-color: var(--app-accent-border, #a7f3d0) !important;
+}
+
+.border-accent-themed {
+  border-color: var(--app-accent-border, #a7f3d0) !important;
+}
+
+.ring-accent-primary {
+  --tw-ring-color: var(--app-accent-primary, #059669) !important;
+}
+
+.card-hero-accent {
+  background: var(--app-accent-primary, #059669) !important;
+  color: #ffffff !important;
+}
+
+.badge-accent-theme {
+  background-color: var(--app-accent-surface, #ecfdf5) !important;
+  color: var(--app-accent-text, #047857) !important;
+  border: 1.5px solid var(--app-accent-border, #a7f3d0) !important;
+}
+
+.badge-accent-solid {
+  background-color: var(--app-accent-primary, #059669) !important;
+  color: #ffffff !important;
+}
+
+.card-accent-outline {
+  border: 1.5px solid var(--app-accent-border, #a7f3d0) !important;
+}
+
+.card-accent-highlight {
+  border-left: 4px solid var(--app-accent-primary, #059669) !important;
+}
+
+.shadow-accent-glow {
+  box-shadow: 0 10px 30px -5px var(--app-accent-glow, rgba(5, 150, 105, 0.25)) !important;
+}
+
+.gradient-accent-text {
+  background: var(--app-accent-primary, #059669) !important;
+  -webkit-background-clip: text !important;
+  -webkit-text-fill-color: transparent !important;
+}
+
+/* Glassmorphism utilities */
+.glass-bar {
+  background: rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.dark .glass-bar {
+  background: rgba(15, 23, 42, 0.92);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+/* HIGH-CONTRAST READABILITY & BOUNDARY SEPARATION SYSTEM */
+/* Prevents eye strain by ensuring solid optical contrast on all text and card surfaces */
+:root {
+  --app-card-border: #cbd5e1; /* Slate-300: crisp separation against canvas */
+  --app-card-bg: #ffffff;
+  --app-subtle-bg: #f1f5f9; /* Slate-100: clear inner panel separation */
+}
+
+.dark {
+  --app-card-border: #3B475C; /* Sharp, refined boundary against dark canvas */
+  --app-card-bg: #141822;
+  --app-subtle-bg: #1C2230;
+}
+
+/* Contrast enhancement: ensure muted text has crisp contrast on light & dark mode */
+html:not(.dark) .text-slate-400 {
+  color: #475569 !important; /* Slate-600 */
+}
+
+html:not(.dark) .text-slate-500 {
+  color: #334155 !important; /* Slate-700 */
+}
+
+.dark .text-slate-400 {
+  color: #cbd5e1 !important; /* Slate-300 - clear high contrast */
+}
+
+.dark .text-slate-500 {
+  color: #e2e8f0 !important; /* Slate-200 */
+}
+
+.dark .text-slate-600 {
+  color: #f1f5f9 !important; /* Slate-100 */
+}
+
+.dark .text-stone-400 {
+  color: #d6d3d1 !important; /* Stone-300 */
+}
+
+.dark .text-stone-500 {
+  color: #e7e5e4 !important; /* Stone-200 */
+}
+
+/* Defined subtle borders in dark mode across standard utility borders */
+.dark .border-slate-800,
+.dark .border-stone-800 {
+  border-color: rgba(255, 255, 255, 0.14) !important;
+}
+
+.dark .border-slate-700,
+.dark .border-stone-700 {
+  border-color: rgba(255, 255, 255, 0.20) !important;
+}
+
+/* Crisp card boundaries with visible separation */
+.card-distinct {
+  background-color: var(--app-card-bg);
+  border: 2px solid var(--app-card-border);
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+}
+
+/* High contrast inputs and controls */
+input::placeholder {
+  color: #64748b !important;
+  opacity: 0.9 !important;
+}
+
+.dark input::placeholder {
+  color: #94a3b8 !important;
+  opacity: 0.9 !important;
+}
+
+/* ------------------------------------------------------------------ */
+/* Fluidez e conforto de uso (mobile-first / PWA)                     */
+/* ------------------------------------------------------------------ */
+@layer base {
+  html {
+    /* Evita o "salto" de largura quando a barra de rolagem aparece/some */
+    scrollbar-gutter: stable;
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
+  body {
+    /* Evita o efeito elástico que "arrasta" o app inteiro no iOS */
+    overscroll-behavior-y: contain;
+  }
+
+  /* Remove o flash cinza ao tocar em botões no mobile */
+  button,
+  a,
+  [role='button'] {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* Respeita quem prefere menos animação (acessibilidade e fluidez) */
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto !important;
+    }
+
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+/* Área segura do PWA (notch / barra inferior do iPhone) */
+.pwa-safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* Foco visível consistente para navegação por teclado */
+:focus-visible {
+  outline: 2px solid var(--app-accent-primary, #059669);
+  outline-offset: 2px;
+}
+
+/* ------------------------------------------------------------------ */
+/* DESIGN SYSTEM — base do redesign minimalista                        */
+/* Tokens neutros + utilitários usados pelos componentes novos.      */
+/* ------------------------------------------------------------------ */
+:root {
+  /* Superfícies neutras (o app não deve depender de gradientes) */
+  --app-surface: #ffffff;
+  --app-surface-muted: #f8fafc;
+  --app-surface-sunken: #f1f5f9;
+  --app-border-soft: #e2e8f0;
+  --app-border-strong: #cbd5e1;
+  --app-text: #0f172a;
+  --app-text-muted: #475569;
+
+  /* Raios: consistência de forma */
+  --app-radius-card: 1rem;
+  --app-radius-control: 0.75rem;
+  --app-radius-pill: 9999px;
+
+  /* Elevação: profundidade leve, sem sombras "pesadas" */
+  --app-shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04), 0 1px 3px rgba(15, 23, 42, 0.06);
+  --app-shadow-raised: 0 8px 24px -10px rgba(15, 23, 42, 0.18);
+  --app-shadow-overlay: 0 20px 48px -16px rgba(15, 23, 42, 0.28);
+
+  /* Movimento */
+  --app-motion-fast: 120ms;
+  --app-motion-base: 200ms;
+  --app-ease: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.dark {
+  --app-surface: #0f172a;
+  --app-surface-muted: #111c33;
+  --app-surface-sunken: #1e293b;
+  --app-border-soft: #1e293b;
+  --app-border-strong: #334155;
+  --app-text: #f8fafc;
+  --app-text-muted: #cbd5e1;
+}
+
+/* Cartão neutro padrão: substitui gradientes decorativos */
+.surface-card {
+  background-color: var(--app-surface);
+  border: 1px solid var(--app-border-soft);
+  border-radius: var(--app-radius-card);
+  box-shadow: var(--app-shadow-card);
+}
+
+.surface-panel {
+  background-color: var(--app-surface-muted);
+  border: 1px solid var(--app-border-soft);
+  border-radius: var(--app-radius-control);
+}
+
+/* Suaviza as sombras mais profundas: mantém hierarquia sem peso visual */
+.shadow-xl,
+.shadow-2xl {
+  box-shadow: var(--app-shadow-raised) !important;
+}
+
+/* Título de seção: sem CAIXA ALTA forçada, hierarquia por peso */
+.section-title {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: -0.01em;
+  color: var(--app-text);
+}
+
+.dark .section-title {
+  color: #f8fafc;
+}
+
+.section-subtitle {
+  font-size: 0.8125rem;
+  font-weight: 500;
+  line-height: 1.45;
+  color: var(--app-text-muted);
+}
+
+/* Botões: três variantes, uso consistente em todo o app */
+.btn-accent {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-height: 2.75rem;
+  padding: 0.625rem 1rem;
+  border-radius: var(--app-radius-control);
+  background-color: var(--app-accent-primary);
+  color: #fff;
+  font-size: 0.875rem;
+  font-weight: 600;
+  transition: background-color var(--app-motion-fast) var(--app-ease);
+}
+
+.btn-accent:hover {
+  background-color: var(--app-accent-hover);
+}
+
+.btn-outline {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-height: 2.75rem;
+  padding: 0.625rem 1rem;
+  border-radius: var(--app-radius-control);
+  border: 1px solid var(--app-border-strong);
+  background-color: var(--app-surface);
+  color: var(--app-text);
+  font-size: 0.875rem;
+  font-weight: 600;
+  transition: background-color var(--app-motion-fast) var(--app-ease),
+    border-color var(--app-motion-fast) var(--app-ease);
+}
+
+.btn-outline:hover {
+  background-color: var(--app-surface-muted);
+}
+
+.btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-height: 2.75rem;
+  padding: 0.625rem 0.875rem;
+  border-radius: var(--app-radius-control);
+  color: var(--app-text-muted);
+  font-size: 0.875rem;
+  font-weight: 500;
+  transition: background-color var(--app-motion-fast) var(--app-ease),
+    color var(--app-motion-fast) var(--app-ease);
+}
+
+.btn-ghost:hover {
+  background-color: var(--app-surface-sunken);
+  color: var(--app-text);
+}
+
+/* Cartão clicável: alvo de toque confortável + foco visível */
+.interactive-card {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border-radius: var(--app-radius-card);
+  border: 1px solid var(--app-border-soft);
+  background-color: var(--app-surface);
+  transition: border-color var(--app-motion-fast) var(--app-ease),
+    background-color var(--app-motion-fast) var(--app-ease);
+}
+
+.interactive-card:hover {
+  border-color: var(--app-border-strong);
+  background-color: var(--app-surface-muted);
+}
+
+/* ------------------------------------------------------------------ */
+/* BENTO GRID & CLAYMORPHISM SYSTEM                                   */
+/* ------------------------------------------------------------------ */
+.bento-squircle {
+  border-radius: 28px;
+}
+
+.clay-card {
+  border-radius: 28px;
+  background-color: #FFFFFF;
+  border: 1.5px solid rgba(17, 19, 24, 0.08);
+  box-shadow: 0 12px 28px -6px rgba(17, 19, 24, 0.06), 0 4px 12px -2px rgba(17, 19, 24, 0.03), inset 0 2px 4px rgba(255, 255, 255, 0.95);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.dark .clay-card {
+  background-color: var(--app-charcoal-card);
+  border: 1.5px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 12px 30px -6px rgba(0, 0, 0, 0.5), inset 0 1px 2px rgba(255, 255, 255, 0.1);
+}
+
+.clay-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 16px 36px -6px rgba(17, 19, 24, 0.09), 0 6px 16px -2px rgba(17, 19, 24, 0.04), inset 0 2px 4px rgba(255, 255, 255, 0.95);
+}
+
+.dark .clay-card:hover {
+  box-shadow: 0 16px 36px -6px rgba(0, 0, 0, 0.65), inset 0 1px 2px rgba(255, 255, 255, 0.14);
+}
+
+/* Claymorphic Embossed Element */
+.clay-embossed {
+  border-radius: 22px;
+  box-shadow: inset 0 2px 4px rgba(255, 255, 255, 0.8), 0 6px 16px -3px rgba(17, 19, 24, 0.08);
+}
+
+.dark .clay-embossed {
+  box-shadow: inset 0 1px 2px rgba(255, 255, 255, 0.15), 0 6px 16px -3px rgba(0, 0, 0, 0.4);
+}
+
+/* Pastel Bento Tone Cards */
+.bento-card-lavender {
+  background-color: #F6F2FF;
+  border: 1.5px solid #D8C7FF;
+}
+.dark .bento-card-lavender {
+  background-color: rgba(216, 199, 255, 0.08);
+  border-color: rgba(216, 199, 255, 0.25);
+}
+
+.bento-card-ochre {
+  background-color: #FFF9ED;
+  border: 1.5px solid #FFC875;
+}
+.dark .bento-card-ochre {
+  background-color: rgba(255, 200, 117, 0.08);
+  border-color: rgba(255, 200, 117, 0.25);
+}
+
+.bento-card-skyblue {
+  background-color: #F2F8FF;
+  border: 1.5px solid #A6D8FF;
+}
+.dark .bento-card-skyblue {
+  background-color: rgba(166, 216, 255, 0.08);
+  border-color: rgba(166, 216, 255, 0.25);
+}
+
+.bento-card-pink {
+  background-color: #FFF3F8;
+  border: 1.5px solid #FFC2E2;
+}
+.dark .bento-card-pink {
+  background-color: rgba(255, 194, 226, 0.08);
+  border-color: rgba(255, 194, 226, 0.25);
+}
+
+.bento-card-sage {
+  background-color: #F3FAF1;
+  border: 1.5px solid #B8E0B0;
+}
+.dark .bento-card-sage {
+  background-color: rgba(184, 224, 176, 0.08);
+  border-color: rgba(184, 224, 176, 0.25);
+}
+
+/* Floating Dark Capsule Navigation */
+.floating-dark-bar {
+  background-color: rgba(17, 19, 24, 0.94);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  color: #FFFFFF;
+  border-radius: 9999px;
+  box-shadow: 0 18px 45px -8px rgba(17, 19, 24, 0.5), 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+/* Elevated Magic Action Button (+) */
+.floating-magic-button {
+  background: linear-gradient(135deg, #FFC875, #FFB042);
+  color: #111318;
+  box-shadow: 0 8px 24px -4px rgba(255, 176, 66, 0.5), inset 0 2px 3px rgba(255, 255, 255, 0.7);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.floating-magic-button:active {
+  transform: scale(0.92);
+}
+
+
+
+/* Juntô: an editorial welcome, with a quiet paper-and-forest palette. */
+.welcome-page { min-height: 100dvh; background: #f7f5ef; color: #233c32; }
+.welcome-header { max-width: 1280px; margin: auto; height: 98px; padding: 0 48px; display: flex; align-items: center; justify-content: space-between; gap: 24px; border-bottom: 1px solid #dedfd4; }
+.welcome-tagline { color: #748074; font-size: 12px; }
+.welcome-text-button { display: flex; align-items: center; gap: 12px; font-size: 13px; font-weight: 600; padding: 12px 0; }
+.welcome-main { max-width: 1280px; padding: 66px 48px 54px; margin: auto; display: grid; grid-template-columns: minmax(0,1.35fr) minmax(330px,1fr); gap: 84px; align-items: center; }
+.welcome-eyebrow { font-size: 10px; letter-spacing: .15em; font-weight: 700; display: flex; align-items: center; gap: 9px; color: #627467; }
+.welcome-eyebrow > span { width: 6px; height: 6px; border-radius: 100%; background: #859d70; }
+.welcome-story h1 { font-family: Georgia, 'Times New Roman', serif; font-weight: 400; font-size: clamp(36px,4.3vw,59px); line-height: 1.12; letter-spacing: -.045em; margin: 23px 0 20px; }
+.welcome-story h1 span { color: #7c8d70; }
+.welcome-intro { max-width: 410px; color: #68756a; font-size: 14px; line-height: 1.8; }
+.welcome-photo { margin-top: 32px; position: relative; height: 248px; overflow: hidden; border-radius: 5px 56px 5px 5px; }
+.welcome-photo > img { width: 100%; height: 100%; object-fit: cover; object-position: center 48%; }
+.welcome-photo-note { position: absolute; bottom: 17px; left: 17px; display: flex; align-items: center; gap: 12px; padding: 13px 17px; background: #f9f8f0f2; border-radius: 3px; font-size: 11px; line-height: 1.6; }
+.welcome-photo-note strong { font-weight: 600; }
+.welcome-features { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 21px; margin-top: 28px; }
+.welcome-features svg { color: #71876a; margin-bottom: 10px; stroke-width: 1.5; }
+.welcome-features strong { font-size: 11px; display: block; font-weight: 600; }
+.welcome-features p { font-size: 10px; line-height: 1.65; color: #788076; margin-top: 5px; }
+.welcome-access { padding-top: 8px; }
+.welcome-access-card { background: #fffefa; border: 1px solid #e1e3d9; border-radius: 12px; padding: 34px 35px; box-shadow: 0 12px 35px -25px #31413245; }
+.welcome-access-symbol { height: 43px; width: 43px; display: grid; place-items: center; border: 1px solid #d7ddcf; border-radius: 50%; font-family: Georgia, serif; font-size: 29px; font-style: italic; margin-bottom: 23px; background: #eef1e8; }
+.welcome-access h2 { font-family: Georgia, serif; font-weight: 400; font-size: 28px; letter-spacing: -.03em; margin-top: 10px; }
+.welcome-access-description { color: #7b8177; font-size: 11px; line-height: 1.7; margin-top: 9px; }
+.welcome-form { display: grid; gap: 17px; margin-top: 27px; }
+.welcome-form label { display: block; margin-bottom: 7px; font-size: 11px; font-weight: 600; }
+.welcome-form input { min-height: 46px; border: 1px solid #d9ddd1; background: #fffefa; border-radius: 6px; padding: 11px 13px; width: 100%; font-size: 13px; color: #233c32; }
+.welcome-form input::placeholder { color: #899084 !important; }
+.welcome-form input:focus { outline: 2px solid #6a8669; outline-offset: 2px; }
+.welcome-password { position: relative; }
+.welcome-password input { padding-right: 46px; }
+.welcome-password button { position: absolute; right: 2px; top: 2px; width: 42px; height: 42px; display: grid; place-items: center; color: #8b9288; }
+.welcome-submit { min-height: 47px; border-radius: 6px; background: #284b3b; color: white; display: flex; align-items: center; justify-content: center; gap: 14px; font-size: 12px; font-weight: 600; margin-top: 3px; transition: background .15s; }
+.welcome-submit:hover { background: #1c392c; }
+.welcome-page button:disabled { opacity: .6; cursor: wait; }
+.welcome-page button:not(:disabled) { cursor: pointer; }
+.welcome-error { background: #fff0e9; border: 1px solid #eacbbd; color: #8a3929; padding: 10px; border-radius: 6px; font-size: 12px; line-height: 1.6; }
+.welcome-divider { display: flex; align-items: center; gap: 13px; color: #899084; font-size: 10px; margin: 21px 0; }
+.welcome-divider span { height: 1px; background: #e6e7df; flex: 1; }
+.welcome-google { width: 100%; min-height: 45px; border: 1px solid #d9ddd1; border-radius: 6px; display: flex; align-items: center; justify-content: center; gap: 11px; font-size: 12px; }
+.welcome-google:hover { background: #f3f4ec; }
+.welcome-mode { font-size: 11px; color: #80877d; text-align: center; margin-top: 23px; }
+.welcome-mode button { font-weight: 600; color: #284b3b; margin-left: 4px; text-decoration: underline; text-underline-offset: 3px; }
+.welcome-preview { display: flex; gap: 9px; align-items: center; justify-content: center; margin: 23px auto 0; font-size: 12px; font-weight: 600; }
+.welcome-preview-note { font-size: 10px; color: #7b8378; text-align: center; margin-top: 8px; }
+.welcome-footer { max-width: 1184px; margin: 0 auto; border-top: 1px solid #dedfd4; padding: 22px 0; display: flex; justify-content: space-between; gap: 16px; font-size: 10px; color: #858b80; }
+@media (max-width: 1000px) { .welcome-main { gap: 38px; padding: 46px 30px; } .welcome-header { padding: 0 30px; } .welcome-access-card { padding: 29px 25px; } .welcome-footer { margin: 0 30px; } .welcome-tagline { display: none; } }
+@media (max-width: 720px) { .welcome-header { height: 76px; padding: 0 22px; } .welcome-main { grid-template-columns: 1fr; padding: 35px 22px; gap: 33px; max-width: 520px; } .welcome-story h1 { font-size: 43px; margin-top: 18px; } .welcome-photo { height: 190px; margin-top: 25px; } .welcome-features { gap: 15px; } .welcome-access { padding-top: 0; } .welcome-access-card { padding: 28px 25px; } .welcome-footer { margin: 0 22px; flex-direction: column; gap: 6px; } .welcome-access-symbol { display: none; } }
+/* Calmer depth on everyday financial surfaces; motion belongs to actions. */
+.clay-card { border-radius: 20px; box-shadow: 0 3px 12px -7px rgba(34,50,40,.14); }
+.clay-card:hover { transform: none; box-shadow: 0 3px 12px -7px rgba(34,50,40,.14); }
+.dark .clay-card, .dark .clay-card:hover { box-shadow: 0 3px 12px -7px rgba(0,0,0,.4); }
+.floating-dark-bar { box-shadow: 0 8px 25px -12px rgba(17,19,24,.4); }
+.floating-magic-button { background: #d6e1bc; box-shadow: 0 4px 12px -5px rgba(17,19,24,.3); }
+input, select, textarea { scroll-margin-block: 100px; }
+@media (max-width: 640px) { input:not([type='checkbox']):not([type='radio']):not([type='range']), select, textarea { font-size: max(16px, 1em); } }

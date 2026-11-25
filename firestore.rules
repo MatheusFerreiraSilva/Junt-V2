@@ -1,0 +1,416 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // =========================================================================
+    // AUXILIARY IDENTITY & VALIDATION PRIMITIVES
+    // =========================================================================
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    function isHouseholdMember(hid) {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/households/$(hid))
+        && request.auth.uid in get(/databases/$(database)/documents/households/$(hid)).data.memberUids;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isCycleId(cycleId) {
+      return cycleId is string && cycleId.matches('^[0-9]{4}_[0-9]{2}$');
+    }
+
+    function isPositiveMoney(val) {
+      return val is number && val > 0 && val <= 90071992547409;
+    }
+
+    function isNonNegativeMoney(val) {
+      return val is number && val >= 0 && val <= 90071992547409;
+    }
+
+    function isSignedMoney(val) {
+      return val is number && val >= -90071992547409 && val <= 90071992547409;
+    }
+
+    function isRate(val) {
+      return val is number && val >= 0 && val <= 1;
+    }
+
+    function hasNoSecrets(data) {
+      return !data.keys().hasAny(['pluggyCredentials', 'clientSecret', 'apiKey', 'accessToken']);
+    }
+
+    // =========================================================================
+    // VALIDATION BLUEPRINTS (v2.3)
+    // =========================================================================
+    function isValidHousehold(data) {
+      return hasNoSecrets(data)
+        && data.keys().hasAll([
+          'memberUids', 'memberTaxIds', 'cycleStartDay', 'mandatoryGoalRate',
+          'housingCapRate', 'structureCapRate', 'installmentCapMin', 'installmentCapMax',
+          'installmentCapTarget', 'allowanceFloor', 'allowanceCap', 'shieldFloorMonths',
+          'shieldTargetMonths', 'defaultShiftTaxRate', 'goalAllocationRules'
+        ])
+        && data.keys().hasOnly([
+          'id', 'memberUids', 'memberTaxIds', 'cycleStartDay', 'mandatoryGoalRate',
+          'housingCapRate', 'structureCapRate', 'installmentCapMin', 'installmentCapMax',
+          'installmentCapTarget', 'allowanceFloor', 'allowanceCap', 'shieldFloorMonths',
+          'shieldTargetMonths', 'defaultShiftTaxRate', 'goalAllocationRules'
+        ])
+        && (!('id' in data) || isValidId(data.id))
+        && data.memberUids is list && data.memberUids.size() >= 1 && data.memberUids.size() <= 2
+        && data.memberUids[0] is string && data.memberUids[0].size() > 0 && data.memberUids[0].size() <= 128
+        && (data.memberUids.size() == 1 || (data.memberUids[1] is string && data.memberUids[1].size() > 0 && data.memberUids[1].size() <= 128))
+        && data.memberTaxIds is list && data.memberTaxIds.size() <= 4
+        && data.cycleStartDay is int && data.cycleStartDay >= 1 && data.cycleStartDay <= 28
+        && isRate(data.mandatoryGoalRate)
+        && isRate(data.housingCapRate)
+        && isRate(data.structureCapRate)
+        && isRate(data.installmentCapMin)
+        && isRate(data.installmentCapMax)
+        && isRate(data.installmentCapTarget)
+        && isNonNegativeMoney(data.allowanceFloor)
+        && isNonNegativeMoney(data.allowanceCap)
+        && data.allowanceCap >= data.allowanceFloor
+        && data.shieldFloorMonths is number && data.shieldFloorMonths >= 0 && data.shieldFloorMonths <= 120
+        && data.shieldTargetMonths is number && data.shieldTargetMonths >= data.shieldFloorMonths && data.shieldTargetMonths <= 120
+        && isRate(data.defaultShiftTaxRate)
+        && data.goalAllocationRules is list && data.goalAllocationRules.size() <= 50;
+    }
+
+    function isValidBudgetCycle(data) {
+      return hasNoSecrets(data)
+        && data.keys().hasAll([
+          'newNetIncome', 'previousMonthCarryOver', 'totalAvailableCash', 'mandatoryGoalAmount',
+          'housingTotal', 'essentialFixedTotal', 'cancelableFixedTotal', 'installmentsTotal',
+          'groceriesBudget', 'routineBudget', 'unexpectedBufferLimit', 'unexpectedBufferSpent',
+          'unlockedAllowanceA', 'unlockedAllowanceB', 'boostTransfers', 'closingSurplus', 'surplusRouting'
+        ])
+        && data.keys().hasOnly([
+          'newNetIncome', 'previousMonthCarryOver', 'totalAvailableCash', 'mandatoryGoalAmount',
+          'housingTotal', 'essentialFixedTotal', 'cancelableFixedTotal', 'installmentsTotal',
+          'groceriesBudget', 'routineBudget', 'unexpectedBufferLimit', 'unexpectedBufferSpent',
+          'unlockedAllowanceA', 'unlockedAllowanceB', 'boostTransfers', 'closingSurplus', 'surplusRouting'
+        ])
+        && isNonNegativeMoney(data.newNetIncome)
+        && isSignedMoney(data.previousMonthCarryOver)
+        && isSignedMoney(data.totalAvailableCash)
+        && isNonNegativeMoney(data.mandatoryGoalAmount)
+        && isNonNegativeMoney(data.housingTotal)
+        && isNonNegativeMoney(data.essentialFixedTotal)
+        && isNonNegativeMoney(data.cancelableFixedTotal)
+        && isNonNegativeMoney(data.installmentsTotal)
+        && isNonNegativeMoney(data.groceriesBudget)
+        && isNonNegativeMoney(data.routineBudget)
+        && isNonNegativeMoney(data.unexpectedBufferLimit)
+        && isNonNegativeMoney(data.unexpectedBufferSpent)
+        && isNonNegativeMoney(data.unlockedAllowanceA)
+        && isNonNegativeMoney(data.unlockedAllowanceB)
+        && data.boostTransfers is list && data.boostTransfers.size() <= 100
+        && isSignedMoney(data.closingSurplus)
+        && data.surplusRouting in ['carry_over', 'goals'];
+    }
+
+    function isValidHouseholdTransaction(data) {
+      return hasNoSecrets(data)
+        && data.keys().hasAll(['title', 'bucket', 'amount', 'date', 'paidByUid', 'cycleId'])
+        && data.keys().hasOnly(['title', 'bucket', 'amount', 'date', 'paidByUid', 'cycleId', 'importHash'])
+        && data.title is string && data.title.size() > 0 && data.title.size() <= 200
+        && data.bucket in ['housing', 'fixed_essential', 'fixed_cancelable', 'groceries', 'routine', 'buffer']
+        && isPositiveMoney(data.amount)
+        && data.date is string && data.date.size() > 0 && data.date.size() <= 64
+        && data.paidByUid is string && data.paidByUid.size() > 0 && data.paidByUid.size() <= 128
+        && isCycleId(data.cycleId)
+        && (!('importHash' in data) || data.importHash == null || (data.importHash is string && data.importHash.size() <= 256));
+    }
+
+    function isValidSharedAllowanceExpense(data) {
+      return hasNoSecrets(data)
+        && data.keys().hasAll(['title', 'category', 'totalAmount', 'splitPerPartner', 'paidByUid', 'date', 'cycleId'])
+        && data.keys().hasOnly(['title', 'category', 'totalAmount', 'splitPerPartner', 'paidByUid', 'date', 'cycleId'])
+        && data.title is string && data.title.size() > 0 && data.title.size() <= 200
+        && data.category is string && data.category.size() > 0 && data.category.size() <= 80
+        && isPositiveMoney(data.totalAmount)
+        && isPositiveMoney(data.splitPerPartner)
+        && (data.splitPerPartner - (data.totalAmount / 2)) <= 0.01
+        && ((data.totalAmount / 2) - data.splitPerPartner) <= 0.01
+        && data.paidByUid is string && data.paidByUid.size() > 0 && data.paidByUid.size() <= 128
+        && data.date is string && data.date.size() > 0 && data.date.size() <= 64
+        && isCycleId(data.cycleId);
+    }
+
+    function isValidInstallmentPlan(data) {
+      return hasNoSecrets(data)
+        && data.keys().hasAll(['title', 'installmentAmount', 'currentInstallment', 'totalInstallments', 'startCycleId', 'endCycleId'])
+        && data.keys().hasOnly(['title', 'installmentAmount', 'currentInstallment', 'totalInstallments', 'startCycleId', 'endCycleId', 'importHash'])
+        && data.title is string && data.title.size() > 0 && data.title.size() <= 200
+        && isPositiveMoney(data.installmentAmount)
+        && data.currentInstallment is int && data.currentInstallment >= 1
+        && data.totalInstallments is int && data.totalInstallments >= data.currentInstallment && data.totalInstallments <= 480
+        && isCycleId(data.startCycleId)
+        && isCycleId(data.endCycleId)
+        && (!('importHash' in data) || data.importHash == null || (data.importHash is string && data.importHash.size() <= 256));
+    }
+
+    function isValidShift(data) {
+      return hasNoSecrets(data)
+        && data.keys().hasAll(['doctorUid', 'institution', 'shiftDate', 'hours', 'grossAmount', 'netAmount', 'status', 'expectedPayDate'])
+        && data.keys().hasOnly(['doctorUid', 'institution', 'shiftDate', 'hours', 'grossAmount', 'netAmount', 'status', 'expectedPayDate', 'paidAt'])
+        && data.doctorUid is string && data.doctorUid.size() > 0 && data.doctorUid.size() <= 128
+        && data.institution is string && data.institution.size() > 0 && data.institution.size() <= 160
+        && data.shiftDate is string && data.shiftDate.size() > 0 && data.shiftDate.size() <= 64
+        && data.hours is number && data.hours > 0 && data.hours <= 72
+        && isPositiveMoney(data.grossAmount)
+        && isPositiveMoney(data.netAmount)
+        && data.netAmount <= data.grossAmount
+        && data.status in ['scheduled', 'pending_payment', 'paid']
+        && data.expectedPayDate is string && data.expectedPayDate.size() > 0 && data.expectedPayDate.size() <= 64
+        && (!('paidAt' in data) || data.paidAt == null || (data.paidAt is string && data.paidAt.size() <= 64));
+    }
+
+    function isValidGoal(data) {
+      return hasNoSecrets(data)
+        && data.keys().hasAll(['title', 'pillar', 'targetAmount', 'currentAmount', 'autoAllocateWeight'])
+        && data.keys().hasOnly(['title', 'pillar', 'targetAmount', 'currentAmount', 'deadline', 'autoAllocateWeight'])
+        && data.title is string && data.title.size() > 0 && data.title.size() <= 160
+        && data.pillar in ['shield', 'dreams', 'wealth']
+        && isPositiveMoney(data.targetAmount)
+        && isNonNegativeMoney(data.currentAmount)
+        && (!('deadline' in data) || data.deadline == null || (data.deadline is string && data.deadline.size() <= 64))
+        && data.autoAllocateWeight is number && data.autoAllocateWeight >= 0 && data.autoAllocateWeight <= 1000;
+    }
+
+    function isValidGoalContribution(data) {
+      return hasNoSecrets(data)
+        && data.keys().hasAll(['goalId', 'amount', 'source', 'date', 'cycleId'])
+        && data.keys().hasOnly(['goalId', 'amount', 'source', 'contributorUid', 'date', 'cycleId'])
+        && data.goalId is string && data.goalId.size() > 0 && data.goalId.size() <= 128
+        && isPositiveMoney(data.amount)
+        && data.source in ['mandatory_10_percent', 'cycle_surplus', 'partner_allowance_sweep']
+        && (
+          data.source != 'partner_allowance_sweep'
+          || ('contributorUid' in data && data.contributorUid is string && data.contributorUid == request.auth.uid)
+        )
+        && (!('contributorUid' in data) || data.contributorUid == null || (data.contributorUid is string && data.contributorUid.size() <= 128))
+        && data.date is string && data.date.size() > 0 && data.date.size() <= 64
+        && isCycleId(data.cycleId);
+    }
+
+    function isValidUserProfile(data, uid) {
+      return hasNoSecrets(data)
+        && data.keys().hasAll(['uid'])
+        && data.keys().hasOnly(['uid', 'email', 'displayName', 'householdId'])
+        && data.uid == uid
+        && (!('email' in data) || (data.email is string && data.email.size() <= 320))
+        && (!('displayName' in data) || (data.displayName is string && data.displayName.size() <= 80))
+        && (!('householdId' in data) || (data.householdId is string && data.householdId.size() <= 128));
+    }
+
+    function isValidAllowanceWallet(data) {
+      return hasNoSecrets(data)
+        && data.keys().hasAll([
+          'rolloverFromPrevious', 'monthlyAllocation', 'boostsNet',
+          'soloSpent', 'jointAllowanceShareSpent', 'sweptToSharedGoals', 'closingBalance'
+        ])
+        && data.keys().hasOnly([
+          'rolloverFromPrevious', 'monthlyAllocation', 'boostsNet',
+          'soloSpent', 'jointAllowanceShareSpent', 'sweptToSharedGoals', 'closingBalance'
+        ])
+        && isSignedMoney(data.rolloverFromPrevious)
+        && isNonNegativeMoney(data.monthlyAllocation)
+        && isSignedMoney(data.boostsNet)
+        && isNonNegativeMoney(data.soloSpent)
+        && isNonNegativeMoney(data.jointAllowanceShareSpent)
+        && isNonNegativeMoney(data.sweptToSharedGoals)
+        && isSignedMoney(data.closingBalance);
+    }
+
+    function isValidAllowanceExpense(data) {
+      return hasNoSecrets(data)
+        && data.keys().hasAll(['title', 'amount', 'date', 'cycleId'])
+        && data.keys().hasOnly(['title', 'amount', 'installmentInfo', 'date', 'cycleId'])
+        && data.title is string && data.title.size() > 0 && data.title.size() <= 200
+        && isPositiveMoney(data.amount)
+        && (!('installmentInfo' in data) || data.installmentInfo == null || data.installmentInfo is map)
+        && data.date is string && data.date.size() > 0 && data.date.size() <= 64
+        && isCycleId(data.cycleId);
+    }
+
+    // =========================================================================
+    // HOUSEHOLD SHARED WORKSPACE (CAIXA UNICO)
+    // =========================================================================
+    match /households/{hid} {
+      allow get: if isSignedIn() && resource != null && request.auth.uid in resource.data.memberUids;
+      allow list: if isSignedIn() && resource != null && request.auth.uid in resource.data.memberUids;
+      allow create: if isSignedIn() && isValidId(hid) && isValidHousehold(request.resource.data)
+        && request.auth.uid in request.resource.data.memberUids;
+      allow update: if isSignedIn() && resource != null && request.auth.uid in resource.data.memberUids
+        && isValidHousehold(request.resource.data)
+        && request.auth.uid in request.resource.data.memberUids;
+      allow delete: if false;
+
+      match /budget_cycles/{cycleId} {
+        allow get: if isValidId(cycleId) && isHouseholdMember(hid);
+        allow list: if isHouseholdMember(hid);
+        allow create, update: if isCycleId(cycleId) && isHouseholdMember(hid) && isValidBudgetCycle(request.resource.data);
+        allow delete: if isValidId(cycleId) && isHouseholdMember(hid);
+      }
+
+      match /transactions/{txId} {
+        allow get: if isValidId(txId) && isHouseholdMember(hid);
+        allow list: if isHouseholdMember(hid);
+        allow create, update: if isValidId(txId) && isHouseholdMember(hid) && isValidHouseholdTransaction(request.resource.data);
+        allow delete: if isValidId(txId) && isHouseholdMember(hid);
+      }
+
+      match /shared_allowance_expenses/{txId} {
+        allow get: if isValidId(txId) && isHouseholdMember(hid);
+        allow list: if isHouseholdMember(hid);
+        allow create, update: if isValidId(txId) && isHouseholdMember(hid) && isValidSharedAllowanceExpense(request.resource.data);
+        allow delete: if isValidId(txId) && isHouseholdMember(hid);
+      }
+
+      match /installment_plans/{planId} {
+        allow get: if isValidId(planId) && isHouseholdMember(hid);
+        allow list: if isHouseholdMember(hid);
+        allow create, update: if isValidId(planId) && isHouseholdMember(hid) && isValidInstallmentPlan(request.resource.data);
+        allow delete: if isValidId(planId) && isHouseholdMember(hid);
+      }
+
+      match /shifts/{shiftId} {
+        allow get: if isValidId(shiftId) && isHouseholdMember(hid);
+        allow list: if isHouseholdMember(hid);
+        allow create, update: if isValidId(shiftId) && isHouseholdMember(hid) && isValidShift(request.resource.data);
+        allow delete: if isValidId(shiftId) && isHouseholdMember(hid);
+      }
+
+      match /goals/{goalId} {
+        allow get: if isValidId(goalId) && isHouseholdMember(hid);
+        allow list: if isHouseholdMember(hid);
+        allow create, update: if isValidId(goalId) && isHouseholdMember(hid) && isValidGoal(request.resource.data);
+        allow delete: if isValidId(goalId) && isHouseholdMember(hid);
+      }
+
+      match /goal_contributions/{contribId} {
+        allow get: if isValidId(contribId) && isHouseholdMember(hid);
+        allow list: if isHouseholdMember(hid);
+        allow create, update: if isValidId(contribId) && isHouseholdMember(hid) && isValidGoalContribution(request.resource.data);
+        allow delete: if isValidId(contribId) && isHouseholdMember(hid);
+      }
+    }
+
+    // =========================================================================
+    // PRIVATE USER PROFILE & ZERO-SURVEILLANCE ALLOWANCE WALLET
+    // =========================================================================
+    match /users/{uid} {
+      allow get: if isOwner(uid);
+      allow create: if isOwner(uid) && isValidUserProfile(request.resource.data, uid);
+      allow update: if isOwner(uid) && isValidUserProfile(request.resource.data, uid);
+      allow list, delete: if false;
+
+      // BLOQUEIO TOTAL: Nenhum outro usuario (nem parceiro do household) acessa a mesada privada
+      match /allowance_wallets/{cycleId} {
+        allow read: if isOwner(uid);
+        allow create, update: if isOwner(uid) && isCycleId(cycleId) && isValidAllowanceWallet(request.resource.data);
+        allow delete: if isOwner(uid);
+      }
+
+      match /allowance_expenses/{txId} {
+        allow read: if isOwner(uid);
+        allow create, update: if isOwner(uid) && isValidId(txId) && isValidAllowanceExpense(request.resource.data);
+        allow delete: if isOwner(uid);
+      }
+    }
+
+    // =========================================================================
+    // OWNER-BOUND AVATARS & APPEARANCE PREFERENCES
+    // =========================================================================
+    function nonAnonymousSignedIn() {
+      return isSignedIn() && request.auth.token.firebase.sign_in_provider != 'anonymous';
+    }
+
+    function avatarSharedInHousehold(targetUid) {
+      let readerPath = /databases/$(database)/documents/users/$(request.auth.uid);
+      let targetPath = /databases/$(database)/documents/users/$(targetUid);
+      return exists(readerPath) && exists(targetPath)
+        && get(readerPath).data.householdId is string
+        && get(readerPath).data.householdId.size() > 0
+        && get(targetPath).data.householdId == get(readerPath).data.householdId
+        && isHouseholdMember(get(readerPath).data.householdId);
+    }
+
+    function validAvatar(data, uid) {
+      return data.keys().hasAll(['ownerUid', 'revision', 'config'])
+        && data.keys().hasOnly(['ownerUid', 'revision', 'config'])
+        && data.ownerUid == uid && data.revision is int && data.revision > 0 && data.revision <= 9007199254740991
+        && data.config is map
+        && data.config.keys().hasAll(["version","gender","skin","hairColor","hair","eyeColor","eyes","mouth","outfit","outfitColor","accessory"])
+        && data.config.keys().hasOnly(["version","gender","skin","hairColor","hair","eyeColor","eyes","mouth","outfit","outfitColor","accessory"])
+        && data.config.version == 1
+        && data.config.gender in ["feminine","masculine"]
+        && data.config.skin in ["porcelain","peach","honey","caramel","cocoa","umber","espresso"]
+        && data.config.hairColor in ["ink","brown","chestnut","copper","gold","silver","rose","violet"]
+        && data.config.hair in ["crop","fade","quiff","sweep","waves","curls","coils","bob","long","ponytail","bun","braids","bald"]
+        && data.config.eyeColor in ["brown","dark","hazel","green","blue"]
+        && data.config.eyes in ["soft","almond","bright","happy"]
+        && data.config.mouth in ["smile","grin","calm","joy"]
+        && data.config.outfit in ["scrub","labcoat","tee","shirt","hoodie","cardigan","jacket"]
+        && data.config.outfitColor in ["surgicalGreen","navy","burgundy","white","teal","sage","blue","lilac","rose","clay","ochre","charcoal","cream"]
+        && data.config.accessory in ["none","stethoscope","headphones","backpack","bag","soccer","round","square","sunglasses","earrings","freckles","beard"];
+    }
+
+    function avatarAccess(uid) {
+      return nonAnonymousSignedIn() && (request.auth.uid == uid || avatarSharedInHousehold(uid));
+    }
+
+    match /avatars/{uid} {
+      allow get: if avatarAccess(uid);
+      allow create: if avatarAccess(uid) && validAvatar(request.resource.data, uid) && request.resource.data.revision == 1;
+      allow update: if avatarAccess(uid) && validAvatar(request.resource.data, uid)
+        && resource.data.ownerUid == uid && resource.data.revision is int
+        && request.resource.data.revision == resource.data.revision + 1;
+      allow list, delete: if false;
+    }
+
+    function validPreferenceColors(p) {
+      return p is map && p.keys().hasAll(['themeMode', 'accentTheme', 'coupleTheme', 'partner1Theme', 'partner2Theme'])
+        && p.keys().hasOnly(['themeMode', 'accentTheme', 'coupleTheme', 'partner1Theme', 'partner2Theme'])
+        && p.themeMode in ['light', 'dark']
+        && p.accentTheme in ['emerald', 'sapphire', 'violet', 'rose', 'amber', 'slate']
+        && p.coupleTheme in ['emerald', 'sapphire', 'violet', 'rose', 'amber', 'slate']
+        && p.partner1Theme in ['emerald', 'sapphire', 'violet', 'rose', 'amber', 'slate']
+        && p.partner2Theme in ['emerald', 'sapphire', 'violet', 'rose', 'amber', 'slate'];
+    }
+
+    function validPreferences(data, uid) {
+      return data.keys().hasAll(['ownerUid', 'version', 'revision', 'preferences'])
+        && data.keys().hasOnly(['ownerUid', 'version', 'revision', 'preferences'])
+        && data.ownerUid == uid && data.version == 1 && data.revision is int && data.revision > 0 && data.revision < 9007199254740991
+        && validPreferenceColors(data.preferences);
+    }
+
+    match /accountPreferences/{uid} {
+      allow get: if nonAnonymousSignedIn() && request.auth.uid == uid;
+      allow create: if nonAnonymousSignedIn() && request.auth.uid == uid
+        && validPreferences(request.resource.data, uid) && request.resource.data.revision == 1;
+      allow update: if nonAnonymousSignedIn() && request.auth.uid == uid
+        && validPreferences(request.resource.data, uid) && resource.data.ownerUid == uid
+        && request.resource.data.revision == resource.data.revision + 1;
+      allow list, delete: if false;
+    }
+
+    // =========================================================================
+    // DEFAULT DENY CATCH-ALL
+    // =========================================================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

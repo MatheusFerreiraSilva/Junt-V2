@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main, ultra-upgrade]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Lint, typecheck, tests and build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        timeout-minutes: 3
+        run: npm run test
+
+      - name: Setup Java for Firestore rules tests
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Firestore rules (emulator only)
+        run: npx firebase emulators:exec --only firestore --project demo-junto-rules "npx vitest run --config vitest.rules.config.ts"
+
+      - name: Build client and server
+        run: npm run build:all
+
+      - name: Production smoke (no external services)
+        run: node scripts/smoke-production.mjs
