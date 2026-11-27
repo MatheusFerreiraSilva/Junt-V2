@@ -231,7 +231,7 @@ describe('29A UI Modals + Real FinanceProvider Integration', () => {
     expect(screen.getByRole('button', { name: /Confirmar Retirada/i })).toBeInTheDocument();
   });
 
-  it('ExpenseModal Step 5 supports selecting Caixinha de Objetivo and blocks overdraw inline without partial save', () => {
+  it('ExpenseModal 1-screen blocks invalid zero entry and installment-cap overdraw inline without partial save', () => {
     render(
       <FinanceProvider>
         <Harness mode="expense" />
@@ -241,16 +241,17 @@ describe('29A UI Modals + Real FinanceProvider Integration', () => {
     fireEvent.click(screen.getByText('setup-bank'));
     fireEvent.click(screen.getByText('deposit-500'));
 
-    // Enter R$ 700 > R$ 500 in piggy bank
+    // 1. Submitting with empty/zero amount shows inline alert and does not save
+    fireEvent.click(screen.getByRole('button', { name: /Registrar Lançamento/i }));
+    expect(screen.getByRole('alert')).toHaveTextContent(/maior que zero/i);
+    expect(screen.getByTestId('expenses-count')).toHaveTextContent('0');
+    expect(screen.getByTestId('bank-balance')).toHaveTextContent('500');
+
+    // 2. Entering R$ 700 and enabling Compra Parcelada with no 3M income blocks submit inline
     fireEvent.change(screen.getByPlaceholderText('0,00'), { target: { value: '700' } });
-    for (let i = 0; i < 4; i++) {
-      fireEvent.click(screen.getByRole('button', { name: 'Avançar' }));
-    }
+    fireEvent.click(screen.getByRole('switch'));
 
-    fireEvent.click(screen.getByText(/Caixinha de Objetivo/i));
-    fireEvent.click(screen.getByRole('button', { name: /Concluir Gasto/i }));
-
-    expect(screen.getByRole('alert')).toHaveTextContent(/insuficiente/i);
+    expect(screen.getByRole('button', { name: /Registrar Lançamento/i })).toBeDisabled();
     expect(screen.getByTestId('expenses-count')).toHaveTextContent('0');
     expect(screen.getByTestId('bank-balance')).toHaveTextContent('500');
   });

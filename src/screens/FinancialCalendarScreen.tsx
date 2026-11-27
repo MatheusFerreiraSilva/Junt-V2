@@ -46,6 +46,10 @@ export const FinancialCalendarScreen: React.FC<FinancialCalendarScreenProps> = (
     payFixedBill,
     unpayFixedBill,
     triggerCelebration,
+    householdConfig,
+    v23Preferences,
+    waterfallResult,
+    v23MedicalShifts,
   } = useFinance();
 
   const [isFixedPanelOpen, setIsFixedPanelOpen] = useState(false);
@@ -79,11 +83,30 @@ export const FinancialCalendarScreen: React.FC<FinancialCalendarScreenProps> = (
 
   // Compute canonical calendar results using the deterministic engine
   const calendarData = useMemo(() => {
+    const wave2Complement = Math.max(
+      0,
+      (waterfallResult.allowance.fullMonthlyAllocationPerPartner || 0) - householdConfig.allowanceFloor
+    );
     return calculateCalendarEngine(state, activeMonth, viewMode, {
       todayDateStr: todayStr,
       postponedObligations,
+      includeAllowanceWaves: true,
+      cycleStartDay: householdConfig.cycleStartDay,
+      wave2Day: v23Preferences.wave2Day,
+      allowanceFloor: householdConfig.allowanceFloor,
+      wave2ComplementPerPartner: wave2Complement,
     });
-  }, [state, activeMonth, viewMode, todayStr, postponedObligations]);
+  }, [
+    state,
+    activeMonth,
+    viewMode,
+    todayStr,
+    postponedObligations,
+    householdConfig.cycleStartDay,
+    householdConfig.allowanceFloor,
+    v23Preferences.wave2Day,
+    waterfallResult.allowance.fullMonthlyAllocationPerPartner,
+  ]);
 
   const { daysGrid, monthTotals, concentrationAlerts, agenda7Days, agenda30Days } = calendarData;
   const currentAgenda = agendaPeriod === 7 ? agenda7Days : agenda30Days;
@@ -296,7 +319,7 @@ export const FinancialCalendarScreen: React.FC<FinancialCalendarScreenProps> = (
       )}
 
       {/* ========================================================================= */}
-      {/* MONTH SUMMARY METRIC STRIP                                                */}
+      {/* MONTH SUMMARY METRIC STRIP + ONDAS & PLANTÕES v2.3                         */}
       {/* ========================================================================= */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
         {/* Receitas */}
@@ -305,7 +328,7 @@ export const FinancialCalendarScreen: React.FC<FinancialCalendarScreenProps> = (
             <span className="font-semibold">Receitas do Mês</span>
             <ArrowUpRight className="w-4 h-4 text-emerald-500" />
           </div>
-          <div className="text-base sm:text-lg font-black text-emerald-600 dark:text-emerald-400">
+          <div className="text-base sm:text-lg font-black text-emerald-600 dark:text-emerald-400 tabular-nums">
             {formatCurrency(monthTotals.income)}
           </div>
           <div className="text-[10px] text-slate-400 mt-0.5">Entradas confirmadas</div>
@@ -317,7 +340,7 @@ export const FinancialCalendarScreen: React.FC<FinancialCalendarScreenProps> = (
             <span className="font-semibold">Gastos Realizados</span>
             <ArrowDownRight className="w-4 h-4 text-rose-500" />
           </div>
-          <div className="text-base sm:text-lg font-black text-rose-600 dark:text-rose-400">
+          <div className="text-base sm:text-lg font-black text-rose-600 dark:text-rose-400 tabular-nums">
             {formatCurrency(monthTotals.expense)}
           </div>
           <div className="text-[10px] text-slate-400 mt-0.5">Despesas pagas no mês</div>
@@ -329,7 +352,7 @@ export const FinancialCalendarScreen: React.FC<FinancialCalendarScreenProps> = (
             <span className="font-semibold">Saldo Operacional</span>
             <DollarSign className={`w-4 h-4 ${monthTotals.balance >= 0 ? 'text-emerald-500' : 'text-rose-500'}`} />
           </div>
-          <div className={`text-base sm:text-lg font-black ${monthTotals.balance >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
+          <div className={`text-base sm:text-lg font-black tabular-nums ${monthTotals.balance >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
             {formatCurrency(monthTotals.balance)}
           </div>
           <div className="text-[10px] text-slate-400 mt-0.5">Entradas menos saídas</div>
@@ -341,10 +364,10 @@ export const FinancialCalendarScreen: React.FC<FinancialCalendarScreenProps> = (
             <span className="font-semibold">A Pagar no Mês</span>
             <Repeat className="w-4 h-4 text-purple-500" />
           </div>
-          <div className="text-base sm:text-lg font-black text-purple-600 dark:text-purple-400">
+          <div className="text-base sm:text-lg font-black text-purple-600 dark:text-purple-400 tabular-nums">
             {formatCurrency(monthTotals.commitmentsPending)}
           </div>
-          <div className="text-[10px] text-slate-400 mt-0.5">Contas, parcelas e assinaturas</div>
+          <div className="text-[10px] text-slate-400 mt-0.5">Essenciais, canceláveis e parcelas</div>
         </div>
 
         {/* Compromissos Já Quitados */}
@@ -353,10 +376,37 @@ export const FinancialCalendarScreen: React.FC<FinancialCalendarScreenProps> = (
             <span className="font-semibold">Quitados do Mês</span>
             <CheckCircle2 className="w-4 h-4 text-emerald-500" />
           </div>
-          <div className="text-base sm:text-lg font-black text-emerald-600 dark:text-emerald-400">
+          <div className="text-base sm:text-lg font-black text-emerald-600 dark:text-emerald-400 tabular-nums">
             {formatCurrency(monthTotals.commitmentsPaid)}
           </div>
-          <div className="text-[10px] text-slate-400 mt-0.5">Baixados no Hub/Extrato</div>
+          <div className="text-[10px] text-slate-400 mt-0.5">Baixados no extrato</div>
+        </div>
+      </div>
+
+      {/* Ondas da Mesada & Plantões (Competência vs Caixa) */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div className="p-4 rounded-2xl bg-violet-50/70 dark:bg-violet-950/30 border border-violet-200 dark:border-violet-800 flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div>
+            <span className="font-bold text-violet-900 dark:text-violet-200 block">
+              Ondas da Mesada Híbrida neste ciclo
+            </span>
+            <span className="text-[11px] text-violet-700 dark:text-violet-300 tabular-nums">
+              Onda 1 (dia {householdConfig.cycleStartDay}): {formatCurrency(householdConfig.allowanceFloor)}/par ·
+              Onda 2 (dia {v23Preferences.wave2Day}): libera complemento restante
+            </span>
+          </div>
+        </div>
+        <div className="p-4 rounded-2xl bg-sky-50/70 dark:bg-sky-950/30 border border-sky-200 dark:border-sky-800 flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div>
+            <span className="font-bold text-sky-900 dark:text-sky-200 block">
+              Plantões: Competência vs Caixa
+            </span>
+            <span className="text-[11px] text-sky-700 dark:text-sky-300 tabular-nums">
+              Agendados: {v23MedicalShifts.filter(s => s.status === 'scheduled').length} · A Receber:{' '}
+              {v23MedicalShifts.filter(s => s.status === 'pending_payment').length} · Pagos:{' '}
+              {v23MedicalShifts.filter(s => s.status === 'paid').length}
+            </span>
+          </div>
         </div>
       </div>
 
@@ -836,7 +886,7 @@ export const FinancialCalendarScreen: React.FC<FinancialCalendarScreenProps> = (
                             <div className="font-bold text-slate-900 dark:text-white truncate">
                               {obl.title}
                             </div>
-                            <div className="text-[10px] text-slate-500 dark:text-slate-400 flex items-center gap-1.5 mt-0.5">
+                            <div className="text-[10px] text-slate-500 dark:text-slate-400 flex flex-wrap items-center gap-1.5 mt-0.5">
                               <span>
                                 {obl.type === 'fixed_bill'
                                   ? 'Conta Fixa'
@@ -844,8 +894,21 @@ export const FinancialCalendarScreen: React.FC<FinancialCalendarScreenProps> = (
                                   ? 'Assinatura'
                                   : obl.type === 'installment'
                                   ? 'Parcela Cartão'
+                                  : obl.type === 'allowance_wave'
+                                  ? `Onda ${obl.waveNumber || 1} Mesada`
                                   : 'Recebível'}
                               </span>
+                              {obl.essentialClass && (
+                                <span
+                                  className={`px-1.5 py-0.2 rounded font-bold ${
+                                    obl.essentialClass === 'essential'
+                                      ? 'bg-sky-100 dark:bg-sky-900 text-sky-800 dark:text-sky-200'
+                                      : 'bg-amber-100 dark:bg-amber-900 text-amber-800 dark:text-amber-200'
+                                  }`}
+                                >
+                                  {obl.essentialClass === 'essential' ? 'Essencial' : 'Cancelável · Fora da Reserva'}
+                                </span>
+                              )}
                               <span>·</span>
                               <span
                                 className={`px-1.5 py-0.2 rounded font-extrabold ${
@@ -866,56 +929,58 @@ export const FinancialCalendarScreen: React.FC<FinancialCalendarScreenProps> = (
                             </div>
                           </div>
 
-                          <div className="font-black text-slate-950 dark:text-white shrink-0 text-sm">
+                          <div className="font-black text-slate-950 dark:text-white shrink-0 text-sm tabular-nums">
                             {formatCurrency(obl.amount)}
                           </div>
                         </div>
 
                         {/* Actions for this obligation */}
-                        <div className="flex items-center justify-end gap-2 pt-1 border-t border-slate-200/60 dark:border-slate-700/40">
-                          {obl.status === 'pago' ? (
-                            <button
-                              type="button"
-                              onClick={() => handleUnpayObligation(obl)}
-                              className="px-2.5 py-1 rounded-lg text-[10px] font-bold text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 cursor-pointer"
-                            >
-                              Desfazer Pagamento
-                            </button>
-                          ) : (
-                            <>
-                              {obl.isSimulatedPostponed ? (
-                                <button
-                                  type="button"
-                                  onClick={() => handleRestoreOriginalDate(obl.id)}
-                                  className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-bold text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40 cursor-pointer"
-                                >
-                                  <RotateCcw className="w-3 h-3" />
-                                  <span>Restaurar Data</span>
-                                </button>
-                              ) : (
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setPostponeModalItem(obl);
-                                    setPostponeTargetDay(Math.min(28, obl.dueDay + 7));
-                                  }}
-                                  className="px-2.5 py-1 rounded-lg text-[10px] font-bold text-purple-700 dark:text-purple-300 hover:bg-purple-100 dark:hover:bg-purple-900/40 cursor-pointer"
-                                >
-                                  Simular Adiamento
-                                </button>
-                              )}
-
+                        {obl.type !== 'allowance_wave' && (
+                          <div className="flex items-center justify-end gap-2 pt-1 border-t border-slate-200/60 dark:border-slate-700/40">
+                            {obl.status === 'pago' ? (
                               <button
                                 type="button"
-                                onClick={() => handlePayObligation(obl)}
-                                className="flex items-center gap-1 px-3 py-1 rounded-lg text-[10px] font-black bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer shadow-xs active:scale-95"
+                                onClick={() => handleUnpayObligation(obl)}
+                                className="px-2.5 py-1 rounded-lg text-[10px] font-bold text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 cursor-pointer"
                               >
-                                <Check className="w-3 h-3" />
-                                <span>Pagar</span>
+                                Desfazer Pagamento
                               </button>
-                            </>
-                          )}
-                        </div>
+                            ) : (
+                              <>
+                                {obl.isSimulatedPostponed ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRestoreOriginalDate(obl.id)}
+                                    className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-bold text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40 cursor-pointer"
+                                  >
+                                    <RotateCcw className="w-3 h-3" />
+                                    <span>Restaurar Data</span>
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setPostponeModalItem(obl);
+                                      setPostponeTargetDay(Math.min(28, obl.dueDay + 7));
+                                    }}
+                                    className="px-2.5 py-1 rounded-lg text-[10px] font-bold text-purple-700 dark:text-purple-300 hover:bg-purple-100 dark:hover:bg-purple-900/40 cursor-pointer"
+                                  >
+                                    Simular Adiamento
+                                  </button>
+                                )}
+
+                                <button
+                                  type="button"
+                                  onClick={() => handlePayObligation(obl)}
+                                  className="flex items-center gap-1 px-3 py-1 rounded-lg text-[10px] font-black bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer shadow-xs active:scale-95"
+                                >
+                                  <Check className="w-3 h-3" />
+                                  <span>Pagar</span>
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -1050,7 +1115,7 @@ export const FinancialCalendarScreen: React.FC<FinancialCalendarScreenProps> = (
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-500 mb-1">Responsável pelo Pagamento</label>
+                <label className="block text-xs font-bold text-slate-500 mb-1">Origem no Fluxo</label>
                 <div className="grid grid-cols-3 gap-2">
                   <button
                     type="button"
@@ -1061,7 +1126,7 @@ export const FinancialCalendarScreen: React.FC<FinancialCalendarScreenProps> = (
                         : 'bg-slate-50 dark:bg-slate-800 text-slate-600 border-slate-200 dark:border-slate-700'
                     }`}
                   >
-                    Casal (50/50)
+                    Caixa Único (Casa)
                   </button>
                   <button
                     type="button"

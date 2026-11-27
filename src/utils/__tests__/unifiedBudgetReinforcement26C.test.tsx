@@ -32,7 +32,6 @@ import { AvatarProvider } from '../../avatars/AvatarProvider';
 import { ReinforcementProvenanceBar } from '../../components/ReinforcementProvenanceBar';
 import { CategoryReinforcementModal } from '../../components/modals/CategoryReinforcementModal';
 import { HomeScreen } from '../../screens/HomeScreen';
-import { MonthThermometerGauge } from '../../components/MonthThermometerGauge';
 
 function makeState26C(overrides: Partial<AppState> = {}): AppState {
   return {
@@ -803,8 +802,8 @@ describe('Stage 26C — Blue Origin UI, Read-Only Provenance & Non-Mutating Prev
     expect(screen.getByTestId('income-after').textContent).toBe('36000');
   });
 
-  it('HomeScreen and MonthThermometerGauge display blue origin marker and open read-only provenance without triggering parent modals', () => {
-    const onOpenRaioX = vi.fn();
+  it('ReinforcementProvenanceBar opens read-only origin provenance without bubbling and v2.3 HomeScreen renders Cascata 60/30/10 without legacy Raio-X', () => {
+    const onParentCardClick = vi.fn();
     const stateWithReinf = makeState26C({
       financialOperations: [
         {
@@ -823,19 +822,26 @@ describe('Stage 26C — Blue Origin UI, Read-Only Provenance & Non-Mutating Prev
         },
       ],
     });
-    const engine = calculateThermometerEngine(stateWithReinf, 'couple');
+    const reinfSummary = selectCategoryReinforcementSummary(stateWithReinf, 'casal', '2026-11');
+    const reinforcedR$ = (reinfSummary.reinforcementCents.lazer || 0) / 100;
 
     render(
-      <MonthThermometerGauge
-        engineResult={engine}
-        activeLifeTier={LIFE_TIERS.voo_alto}
-        onOpenRaioX={onOpenRaioX}
-      />
+      <div onClick={onParentCardClick}>
+        <ReinforcementProvenanceBar
+          categoryName="Lazer & Férias"
+          competence="2026-11"
+          baseBudget={10000}
+          effectiveBudget={10000 + reinforcedR$}
+          reinforcementAmount={reinforcedR$}
+          spent={2500}
+          sources={reinfSummary.sourcesByCategory.lazer || []}
+        />
+      </div>
     );
 
-    const gaugeBlueBtn = screen.getByTestId('blue-origin-marker-btn');
-    fireEvent.click(gaugeBlueBtn);
-    expect(onOpenRaioX).not.toHaveBeenCalled();
+    const blueBtn = screen.getByTestId('blue-origin-marker-btn');
+    fireEvent.click(blueBtn);
+    expect(onParentCardClick).not.toHaveBeenCalled();
     expect(screen.getByRole('dialog')).toBeTruthy();
     expect(screen.getByText(/Fundo Viagem & Lazer/i)).toBeTruthy();
     cleanup();
@@ -864,9 +870,8 @@ describe('Stage 26C — Blue Origin UI, Read-Only Provenance & Non-Mutating Prev
       </FinanceProvider>
     );
 
-    expect(screen.getAllByTestId('blue-origin-marker-btn').length).toBeGreaterThanOrEqual(1);
-    fireEvent.click(screen.getAllByTestId('blue-origin-marker-btn')[0]);
-    expect(screen.getByRole('dialog')).toBeTruthy();
+    expect(screen.getByText(/Cascata Financeira do Casal/i)).toBeTruthy();
+    expect(screen.getByText(/Duplo Ledger de Sobras/i)).toBeTruthy();
     expect(screen.queryByText(/Raio-X:/i)).toBeNull();
   });
 });

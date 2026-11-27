@@ -1,32 +1,47 @@
-import React, { useState, useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
-  Trash2,
   Edit2,
   Plus,
-  Filter,
-  AlertTriangle,
-  CreditCard,
-  User,
-  Users,
-  Sliders,
   ShieldCheck,
-  Target,
   Sparkles,
+  Trash2,
   X,
+  Home,
+  CreditCard,
 } from 'lucide-react';
 import { useFinance, CATEGORIES_BASE, getCategoryInfo } from '../context/FinanceContext';
-import { CategoryKey, ExpenseItem, PaidBy, FundingSourceType } from '../types/finance';
+import {
+  CategoryKey,
+  ExpenseItem,
+  FundingSourceType,
+  TransactionBucket,
+} from '../types/finance';
 import { formatCurrency } from '../utils/formatters';
 import { MonthSelector } from '../components/MonthSelector';
-import { FoodPacingWeeklyCard } from '../components/FoodPacingWeeklyCard';
-import { BudgetRebalanceModal } from '../components/modals/BudgetRebalanceModal';
-import { ReinforcementProvenanceBar } from '../components/ReinforcementProvenanceBar';
-import { CategoryReinforcementModal } from '../components/modals/CategoryReinforcementModal';
+import {
+  TRANSACTION_BUCKET_META,
+  mapCategoryToBucket,
+  monthKeyToCycleId,
+} from '../utils/v23Helpers';
 
 interface CategoryDetailsScreenProps {
   initialCategory?: CategoryKey;
-  onOpenExpenseModal: (category?: CategoryKey, date?: string, toEdit?: ExpenseItem | null, isDivided?: boolean) => void;
+  onOpenExpenseModal: (
+    category?: CategoryKey,
+    date?: string,
+    toEdit?: ExpenseItem | null,
+    isDivided?: boolean
+  ) => void;
 }
+
+const BUCKET_ORDER: TransactionBucket[] = [
+  'housing',
+  'fixed_essential',
+  'fixed_cancelable',
+  'groceries',
+  'routine',
+  'buffer',
+];
 
 export const CategoryDetailsScreen: React.FC<CategoryDetailsScreenProps> = ({
   initialCategory,
@@ -34,90 +49,63 @@ export const CategoryDetailsScreen: React.FC<CategoryDetailsScreenProps> = ({
 }) => {
   const {
     state,
-    categoriesSpending,
     deleteExpense,
     editExpense,
-    activeInstallments,
-    getExpenseSplit,
-    viewMode,
-    monthlySpendingTotals,
-    updateCategoryPercentages,
-    activeLifeTier,
-    totalIncome,
+    bucketBreakdown,
+    waterfallResult,
+    v23Transactions,
+    v23InstallmentPlans,
+    reclassifyTransactionBucket,
+    activeCycleId,
   } = useFinance();
 
-  const [selectedCategory, setSelectedCategory] = useState<string | 'all'>(
-    initialCategory || 'all'
+  const [selectedBucket, setSelectedBucket] = useState<TransactionBucket | 'all'>(() =>
+    initialCategory ? mapCategoryToBucket(initialCategory) : 'all'
   );
-  const [filterPaidBy, setFilterPaidBy] = useState<PaidBy | 'all'>('all');
-  const [filterScope, setFilterScope] = useState<'all' | 'routine' | 'planned' | 'exceptional'>('all');
+  const [filterScope, setFilterScope] = useState<'all' | 'routine' | 'planned' | 'exceptional'>(
+    'all'
+  );
   const [editingExpense, setEditingExpense] = useState<ExpenseItem | null>(null);
   const [editError, setEditError] = useState<string>('');
-  const [isSimulatingCeiling, setIsSimulatingCeiling] = useState(false);
-  const [isReinforcementModalOpen, setIsReinforcementModalOpen] = useState(false);
 
-  // Ceiling simulation state initialized from current percentages
-  const [simulatedPercentages, setSimulatedPercentages] = useState<Record<CategoryKey, number>>(() => ({
-    moradia: state.categoryPercentages?.moradia ?? activeLifeTier.percentages.moradia ?? 30,
-    transporte: state.categoryPercentages?.transporte ?? activeLifeTier.percentages.transporte ?? 10,
-    comida: state.categoryPercentages?.comida ?? activeLifeTier.percentages.comida ?? 15,
-    lazer: state.categoryPercentages?.lazer ?? activeLifeTier.percentages.lazer ?? 10,
-    protecao: state.categoryPercentages?.protecao ?? activeLifeTier.percentages.protecao ?? 10,
-    profissional: state.categoryPercentages?.profissional ?? activeLifeTier.percentages.profissional ?? 5,
-  }));
+  const currentCycleId = monthKeyToCycleId(state.currentMonth || activeCycleId);
 
-  const openCeilingSimulation = () => {
-    setSimulatedPercentages({
-      moradia: state.categoryPercentages?.moradia ?? activeLifeTier.percentages.moradia ?? 30,
-      transporte: state.categoryPercentages?.transporte ?? activeLifeTier.percentages.transporte ?? 10,
-      comida: state.categoryPercentages?.comida ?? activeLifeTier.percentages.comida ?? 15,
-      lazer: state.categoryPercentages?.lazer ?? activeLifeTier.percentages.lazer ?? 10,
-      protecao: state.categoryPercentages?.protecao ?? activeLifeTier.percentages.protecao ?? 10,
-      profissional: state.categoryPercentages?.profissional ?? activeLifeTier.percentages.profissional ?? 5,
-    });
-    setIsSimulatingCeiling(true);
-  };
+  const v23InCycle = useMemo(
+    () => v23Transactions.filter((tx) => tx.cycleId === currentCycleId),
+    [v23Transactions, currentCycleId]
+  );
 
-  const handleApplySimulatedCeilings = () => {
-    updateCategoryPercentages(simulatedPercentages);
-    setIsSimulatingCeiling(false);
-  };
+  const v23Hashes = useMemo(
+    () => new Set(v23InCycle.map((tx) => tx.importHash).filter((h): h is string => Boolean(h))),
+    [v23InCycle]
+  );
 
-  // Month's manual expenses
+  const filteredV23 = useMemo(() => {
+    if (filterScope === 'planned' || filterScope === 'exceptional') return [];
+    return v23InCycle.filter(
+      (tx) => selectedBucket === 'all' || tx.bucket === selectedBucket
+    );
+  }, [v23InCycle, selectedBucket, filterScope]);
+
   const monthExpenses = useMemo(() => {
-    return state.expenses.filter(e => {
-      if (!e.date.startsWith(state.currentMonth)) return false;
-      if (viewMode === 'partner1') return e.paidBy === 'partner1' || e.paidBy === 'both';
-      if (viewMode === 'partner2') return e.paidBy === 'partner2' || e.paidBy === 'both';
+    return state.expenses.filter((e) => {
+      if (!e || e.isSplitParent) return false;
+      if (!(e.date || '').startsWith(state.currentMonth)) return false;
+      if (e.fundingSource === 'personal_allowance') return false;
+      if (e.operationId?.startsWith('csv-hash:') && v23Hashes.has(e.operationId.slice('csv-hash:'.length))) {
+        return false;
+      }
+      if (e.operationId?.startsWith('v23:') && v23Hashes.has(e.operationId.slice('v23:'.length))) {
+        return false;
+      }
       return true;
     });
-  }, [state.expenses, state.currentMonth, viewMode]);
+  }, [state.expenses, state.currentMonth, v23Hashes]);
 
-  // Discover any legacy or unmapped categories in the expenses list
-  const legacyCategoryKeys = useMemo(() => {
-    const keys = new Set<string>();
-    monthExpenses.forEach(e => {
-      if (e.category && !CATEGORIES_BASE[e.category as CategoryKey]) {
-        keys.add(e.category);
-      }
-    });
-    return Array.from(keys);
-  }, [monthExpenses]);
-
-  // Filtered expenses list
   const filteredExpenses = useMemo(() => {
-    return monthExpenses.filter(item => {
-      const matchCat =
-        selectedCategory === 'all' ||
-        item.category === selectedCategory ||
-        (item.splits && item.splits.some((s) => s.category === selectedCategory));
-      const matchPaid =
-        filterPaidBy === 'all'
-          ? true
-          : filterPaidBy === 'both'
-          ? item.paidBy === 'both'
-          : item.paidBy === filterPaidBy;
-
+    return monthExpenses.filter((item) => {
+      const bucket = mapCategoryToBucket(item.category, item.nature, item.priority);
+      const matchBucket = selectedBucket === 'all' || bucket === selectedBucket;
       const source = item.fundingSource || 'month_budget';
       const matchScope =
         filterScope === 'all'
@@ -127,48 +115,17 @@ export const CategoryDetailsScreen: React.FC<CategoryDetailsScreenProps> = ({
           : filterScope === 'planned'
           ? source === 'piggy_bank'
           : source === 'reserve_excess' || item.amount >= 500;
-
-      return matchCat && matchPaid && matchScope;
+      return matchBucket && matchScope;
     });
-  }, [monthExpenses, selectedCategory, filterPaidBy, filterScope]);
+  }, [monthExpenses, selectedBucket, filterScope]);
 
-  // Active installments in this category for this month
-  const categoryInstallments = useMemo(() => {
-    return activeInstallments.filter(
-      inst => selectedCategory === 'all' || inst.category === selectedCategory
-    );
-  }, [activeInstallments, selectedCategory]);
-
-  // Category diagnostic breakdown (routine, planned, exceptional)
-  const categoryDiagnostics = useMemo(() => {
-    const targetExpenses = monthExpenses.filter(
-      e => selectedCategory === 'all' || e.category === selectedCategory
-    );
-
-    const routine = targetExpenses.filter(
-      e => !e.isExcludedFromMonthlyBudget && (!e.fundingSource || e.fundingSource === 'month_budget')
-    );
-    const planned = targetExpenses.filter(e => e.fundingSource === 'piggy_bank');
-    const exceptional = targetExpenses.filter(
-      e => e.fundingSource === 'reserve_excess' || e.amount >= 500
-    );
-
-    const routineSum = routine.reduce((s, e) => s + e.amount, 0);
-    const plannedSum = planned.reduce((s, e) => s + e.amount, 0);
-    const exceptionalSum = exceptional.reduce((s, e) => s + e.amount, 0);
-
-    // Identify single largest expense that pressured the budget
-    const sorted = [...targetExpenses].sort((a, b) => b.amount - a.amount);
-    const topExpense = sorted[0] || null;
-
-    return {
-      routineSum,
-      plannedSum,
-      exceptionalSum,
-      topExpense,
-      count: targetExpenses.length,
-    };
-  }, [monthExpenses, selectedCategory]);
+  const activePlansInCycle = useMemo(
+    () =>
+      v23InstallmentPlans.filter(
+        (plan) => plan.startCycleId <= currentCycleId && currentCycleId <= plan.endCycleId
+      ),
+    [v23InstallmentPlans, currentCycleId]
+  );
 
   const handleSaveEdit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -178,546 +135,289 @@ export const CategoryDetailsScreen: React.FC<CategoryDetailsScreenProps> = ({
       const syncedAmount = Number(editingExpense.amount) || 0;
       editExpense({
         ...editingExpense,
+        paidBy: 'both',
         amount: syncedAmount,
         amountCents: Math.round(syncedAmount * 100),
       });
       setEditingExpense(null);
-    } catch (err: any) {
-      setEditError(err?.message || 'Não foi possível salvar as alterações deste gasto.');
+    } catch (err: unknown) {
+      setEditError(
+        err instanceof Error ? err.message : 'Não foi possível salvar as alterações deste gasto.'
+      );
     }
   };
 
-  const currentCategoryInfo = selectedCategory !== 'all' ? getCategoryInfo(selectedCategory) : null;
-  const currentCategorySpend =
-    selectedCategory !== 'all' && (selectedCategory in categoriesSpending)
-      ? categoriesSpending[selectedCategory as CategoryKey]
-      : null;
+  const housingPct = Math.round(waterfallResult.guards.housing.ratio * 100);
+  const structurePct = Math.round(waterfallResult.guards.structure.ratio * 100);
 
   return (
     <div className="space-y-6 pb-20">
       <MonthSelector />
 
-      {/* Screen Title & Subtitle */}
+      {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div className="space-y-1">
           <h2 className="text-xl sm:text-2xl font-bold text-slate-900 dark:text-white font-display tracking-tight">
-            Gastos por Categoria, Fontes & Divisão
+            Sub-Envelopes da Cascata 60/30/10
           </h2>
           <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400">
-            Acompanhe o consumo econômico real, a blindagem das caixinhas e a divisão justa do casal.
+            Caixa Único da casa organizado em 6 envelopes estruturais — sem rateio nem acerto entre parceiros.
           </p>
         </div>
 
         <button
-          onClick={openCeilingSimulation}
-          className="flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-amber-50 dark:bg-amber-950/40 hover:bg-amber-100 dark:hover:bg-amber-900/60 border border-amber-200 dark:border-amber-800 text-amber-900 dark:text-amber-200 text-xs font-bold transition-all shadow-2xs shrink-0 self-start sm:self-auto"
+          type="button"
+          onClick={() => onOpenExpenseModal()}
+          className="btn-accent min-h-[44px] px-4 py-2 text-xs font-bold shrink-0 self-start sm:self-auto"
         >
-          <Sliders className="w-4 h-4 text-amber-600 dark:text-amber-400" />
-          <span>Simular Remanejamento de Teto</span>
+          <Plus className="w-4 h-4" />
+          <span>Registrar no Caixa Único</span>
         </button>
       </div>
 
-      {/* TRÊS TOTAIS CANÔNICOS DISTINTOS */}
+      {/* Cascade Structure Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-        {/* 1. Despesa Econômica Total */}
-        <div className="p-4 sm:p-5 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 shadow-xs space-y-1.5 transition-colors">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
-              <span>🌐</span> Despesa Econômica Total
-            </span>
-            <span className="text-[10px] px-2 py-0.5 rounded-full font-bold bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
-              Vida Real
-            </span>
+        <div className="clay-card p-4 sm:p-5 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-1">
+          <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+            Estrutura Total (Meta ≤ 60%)
+          </span>
+          <div className="text-xl sm:text-2xl font-black text-slate-900 dark:text-white tabular-nums">
+            {formatCurrency(waterfallResult.guards.structure.actualStructureTotal)}
           </div>
-          <div className="text-xl sm:text-2xl font-black text-slate-900 dark:text-white tabular-nums font-display">
-            {formatCurrency(monthlySpendingTotals.totalEconomicSpent)}
-          </div>
-          <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-tight">
-            Consumo total da vida do casal (inclui rotina, metas/cofrinhos, reserva e parcelas ativas).
+          <p className="text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
+            {structurePct}% da renda · Teto {formatCurrency(waterfallResult.guards.structure.capAmount)}
           </p>
         </div>
 
-        {/* 2. Consumo do Orçamento Rotineiro */}
-        <div className="p-4 sm:p-5 rounded-3xl bg-teal-50/40 dark:bg-teal-950/20 border border-teal-200/80 dark:border-teal-900/60 shadow-xs space-y-1.5 transition-colors">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-teal-800 dark:text-teal-300 uppercase tracking-wider flex items-center gap-1.5">
-              <span>🎯</span> Consumo do Orçamento
-            </span>
-            <span className="text-[10px] px-2 py-0.5 rounded-full font-bold bg-teal-100 dark:bg-teal-950 text-teal-800 dark:text-teal-300 border border-teal-200 dark:border-teal-800">
-              Tetos do Mês
-            </span>
-          </div>
-          <div className="text-xl sm:text-2xl font-black text-teal-900 dark:text-teal-100 tabular-nums font-display">
-            {formatCurrency(monthlySpendingTotals.budgetConsumedSpent)}
-          </div>
-          <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-tight">
-            Débito estrito sobre os tetos mensais. Gastos de caixinhas ou da reserva estão blindados.
-          </p>
-        </div>
-
-        {/* 3. Saída Efetiva de Caixa */}
-        <div className="p-4 sm:p-5 rounded-3xl bg-blue-50/40 dark:bg-blue-950/20 border border-blue-200/80 dark:border-blue-900/60 shadow-xs space-y-1.5 transition-colors">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-blue-800 dark:text-blue-300 uppercase tracking-wider flex items-center gap-1.5">
-              <span>💸</span> Saída de Caixa
-            </span>
-            <span className="text-[10px] px-2 py-0.5 rounded-full font-bold bg-blue-100 dark:bg-blue-950 text-blue-800 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
-              Contas & Pix
-            </span>
-          </div>
-          <div className="text-xl sm:text-2xl font-black text-blue-900 dark:text-blue-100 tabular-nums font-display">
-            {formatCurrency(monthlySpendingTotals.cashOutflowSpent)}
-          </div>
-          <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-tight">
-            Valores liquidados à vista (Pix, débito e dinheiro), que baixaram o saldo bancário imediato.
-          </p>
-        </div>
-      </div>
-
-      {/* Category Filter Tabs with safe fallback for legacy categories */}
-      <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar">
-        <button
-          onClick={() => setSelectedCategory('all')}
-          className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap shrink-0 ${
-            selectedCategory === 'all'
-              ? 'bg-slate-900 dark:bg-white text-white dark:text-slate-900 shadow-xs'
-              : 'bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200/80 dark:border-slate-800'
+        <div
+          className={`clay-card p-4 sm:p-5 rounded-3xl border space-y-1 ${
+            waterfallResult.guards.housing.status !== 'exceeded'
+              ? 'bg-teal-50/50 dark:bg-teal-950/20 border-teal-200 dark:border-teal-800'
+              : 'bg-rose-50/50 dark:bg-rose-950/20 border-rose-200 dark:border-rose-800'
           }`}
         >
-          ✨ Todas as Áreas
-        </button>
-
-        {(Object.keys(CATEGORIES_BASE) as CategoryKey[]).map(key => {
-          const cat = getCategoryInfo(key);
-          const isSelected = selectedCategory === key;
-          const spend = categoriesSpending[key];
-          return (
-            <button
-              key={key}
-              onClick={() => setSelectedCategory(key)}
-              className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap shrink-0 ${
-                isSelected
-                  ? 'bg-accent-primary text-white shadow-xs'
-                  : 'bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200/80 dark:border-slate-800'
-              }`}
-            >
-              <span>{cat.emoji}</span>
-              <span>{cat.name}</span>
-              {spend?.isOver && <span className="text-rose-400">⚠️</span>}
-            </button>
-          );
-        })}
-
-        {/* Legacy / unmapped categories tab if any exist in data */}
-        {legacyCategoryKeys.map(key => {
-          const cat = getCategoryInfo(key);
-          const isSelected = selectedCategory === key;
-          return (
-            <button
-              key={key}
-              onClick={() => setSelectedCategory(key)}
-              className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap shrink-0 border ${
-                isSelected
-                  ? 'bg-amber-600 text-white border-amber-600 shadow-xs'
-                  : 'bg-amber-50 dark:bg-amber-950/30 text-amber-900 dark:text-amber-200 border-amber-200 dark:border-amber-800'
-              }`}
-            >
-              <span>{cat.emoji}</span>
-              <span>{cat.name}</span>
-            </button>
-          );
-        })}
-      </div>
-
-      {/* Comparative Progress Chart */}
-      <div className="bg-white dark:bg-slate-900 rounded-3xl p-5 sm:p-6 border border-slate-200/90 dark:border-slate-800 shadow-xs space-y-4 transition-colors">
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2.5">
-            <span className="w-9 h-9 rounded-2xl bg-accent-surface text-accent-primary flex items-center justify-center text-lg font-bold">
-              📊
-            </span>
-            <div>
-              <h3 className="font-bold text-slate-900 dark:text-white text-base font-display">
-                Gráfico Comparativo de Gastos por Área
-              </h3>
-              <p className="text-xs text-slate-500 dark:text-slate-400">
-                Acompanhe o consumo e o limite combinado de cada categoria neste mês
-              </p>
-            </div>
-          </div>
-        </div>
-
-        {/* Visual Progress Bars */}
-        <div className="space-y-3 pt-2">
-          {(Object.keys(CATEGORIES_BASE) as CategoryKey[]).map(key => {
-            const cat = getCategoryInfo(key);
-            const spend = categoriesSpending[key];
-
-            return (
-              <div
-                key={key}
-                onClick={() => setSelectedCategory(key)}
-                className={`p-3 rounded-2xl border transition-all cursor-pointer ${
-                  selectedCategory === key
-                    ? 'border-accent-primary bg-accent-surface/50 shadow-2xs'
-                    : 'border-slate-100 dark:border-slate-800 hover:border-slate-200 dark:hover:border-slate-700 bg-slate-50/50 dark:bg-slate-800/40'
-                }`}
-              >
-                <div className="flex items-center justify-between text-xs font-bold mb-1.5">
-                  <div className="flex items-center gap-2">
-                    <span className="text-base">{cat.emoji}</span>
-                    <span className="text-slate-900 dark:text-white font-display">{cat.name}</span>
-                    {spend?.isOver && (
-                      <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-rose-100 dark:bg-rose-950 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-900">
-                        ⚠️ +{formatCurrency(spend.spent - spend.budget)}
-                      </span>
-                    )}
-                  </div>
-
-                  <div className="text-right tabular-nums">
-                    <span className="text-slate-900 dark:text-white font-extrabold">
-                      {formatCurrency(spend?.spent || 0)}
-                    </span>
-                    <span className="text-slate-400 font-normal text-[11px] ml-1">
-                      / {formatCurrency(spend?.budget || 0)} ({spend?.percentageUsed || 0}%)
-                    </span>
-                  </div>
-                </div>
-
-                <ReinforcementProvenanceBar
-                  compact
-                  spent={spend?.spent || 0}
-                  baseBudget={spend?.baseBudget ?? spend?.budget ?? 0}
-                  effectiveBudget={spend?.budget || 0}
-                  reinforcementAmount={spend?.reinforcementAmount || 0}
-                  reallocationNetAmount={spend?.reallocationNetAmount || 0}
-                  sources={spend?.reinforcementSources || []}
-                  categoryName={cat.name}
-                  competence={state.currentMonth}
-                  fillClassName={spend?.isOver ? 'bg-rose-500' : 'bg-accent-primary'}
-                  fillColorHex={!spend?.isOver ? cat.colorHex : undefined}
-                />
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Selected Category Header & Diagnostic */}
-      {selectedCategory !== 'all' && currentCategoryInfo && (
-        <div className="bg-white dark:bg-slate-900 rounded-3xl p-5 sm:p-6 border border-slate-200/90 dark:border-slate-800 shadow-xs space-y-4 transition-colors">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <span className="text-3xl">{currentCategoryInfo.emoji}</span>
-              <div>
-                <div className="flex items-center gap-2">
-                  <h3 className="text-lg font-bold text-slate-900 dark:text-white font-display">
-                    {currentCategoryInfo.name}
-                  </h3>
-                  {currentCategoryInfo.isLegacy && (
-                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300">
-                      Revisão Necessária
-                    </span>
-                  )}
-                </div>
-                <p className="text-xs text-slate-500 dark:text-slate-400">
-                  {currentCategoryInfo.description}
-                </p>
-              </div>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setIsReinforcementModalOpen(true)}
-                className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-sky-100 hover:bg-sky-200 dark:bg-sky-950/70 dark:hover:bg-sky-900 text-blue-800 dark:text-sky-200 border border-blue-300 dark:border-sky-700 text-xs font-black shadow-xs transition-colors cursor-pointer"
-              >
-                <Sparkles className="w-3.5 h-3.5" />
-                Reforçar Categoria
-              </button>
-
-              <button
-                onClick={() => onOpenExpenseModal((selectedCategory in CATEGORIES_BASE) ? (selectedCategory as CategoryKey) : undefined)}
-                className="btn-primary-accent flex items-center gap-1.5 px-4 py-2 rounded-xl text-white text-xs font-bold shadow-xs transition-colors"
-              >
-                <Plus className="w-4 h-4" />
-                Adicionar Gasto Aqui
-              </button>
-            </div>
-          </div>
-
-          {/* Metric Bar */}
-          {currentCategorySpend && (
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
-              <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/60 dark:border-slate-700">
-                <span className="text-xs text-slate-500 dark:text-slate-400 font-medium">
-                  {(currentCategorySpend.reinforcementAmount || 0) > 0 ? 'Orçamento efetivo do mês' : 'Combinado do mês'}
-                </span>
-                <div className="text-lg font-extrabold text-slate-900 dark:text-white tabular-nums">
-                  {formatCurrency(currentCategorySpend.budget)}
-                </div>
-                {(currentCategorySpend.reinforcementAmount || 0) > 0 && (
-                  <span className="text-[11px] font-bold text-blue-700 dark:text-sky-300 block mt-0.5">
-                    Meta habitual {formatCurrency(currentCategorySpend.baseBudget ?? currentCategorySpend.budget)} + Reforço +{formatCurrency(currentCategorySpend.reinforcementAmount || 0)}
-                  </span>
-                )}
-              </div>
-
-              <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/60 dark:border-slate-700">
-                <span className="text-xs text-slate-500 dark:text-slate-400 font-medium">Consumo do orçamento</span>
-                <div className="text-lg font-extrabold text-slate-900 dark:text-white tabular-nums">
-                  {formatCurrency(currentCategorySpend.spent)}
-                </div>
-              </div>
-
-              <div
-                className={`p-3.5 rounded-2xl border ${
-                  currentCategorySpend.isOver
-                    ? 'bg-rose-50 dark:bg-rose-950/40 border-rose-200 dark:border-rose-900 text-rose-900 dark:text-rose-200'
-                    : 'bg-accent-surface border-accent-themed text-accent-themed'
-                }`}
-              >
-                <span className="text-xs font-medium opacity-90">
-                  {currentCategorySpend.isOver ? '⚠️ Saldo nominal negativo (passou)' : 'Saldo nominal disponível'}
-                </span>
-                <div className="text-lg font-extrabold tabular-nums">
-                  {currentCategorySpend.remaining < 0
-                    ? `-${formatCurrency(Math.abs(currentCategorySpend.remaining))}`
-                    : formatCurrency(currentCategorySpend.remaining)}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* DIAGNÓSTICO POR CATEGORIA: Rotina vs Planejado vs Excepcional */}
-          <div className="p-4 rounded-2xl bg-slate-50/80 dark:bg-slate-800/50 border border-slate-200/60 dark:border-slate-700 space-y-3">
-            <div className="text-xs font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
-              <span>🩺</span> Diagnóstico de Natureza do Gasto
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
-              <div className="p-2.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800">
-                <div className="font-semibold text-slate-500 dark:text-slate-400">Rotina (Debita Teto)</div>
-                <div className="font-bold text-slate-900 dark:text-white text-sm tabular-nums mt-0.5">
-                  {formatCurrency(categoryDiagnostics.routineSum)}
-                </div>
-              </div>
-              <div className="p-2.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800">
-                <div className="font-semibold text-teal-600 dark:text-teal-400 flex items-center gap-1">
-                  <Target className="w-3 h-3" /> Metas / Caixinhas
-                </div>
-                <div className="font-bold text-teal-700 dark:text-teal-300 text-sm tabular-nums mt-0.5">
-                  {formatCurrency(categoryDiagnostics.plannedSum)}
-                </div>
-              </div>
-              <div className="p-2.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800">
-                <div className="font-semibold text-amber-600 dark:text-amber-400 flex items-center gap-1">
-                  <ShieldCheck className="w-3 h-3" /> Excepcional / Reserva
-                </div>
-                <div className="font-bold text-amber-700 dark:text-amber-300 text-sm tabular-nums mt-0.5">
-                  {formatCurrency(categoryDiagnostics.exceptionalSum)}
-                </div>
-              </div>
-            </div>
-
-            {/* Destaque do registro que causou desvio */}
-            {currentCategorySpend?.isOver && categoryDiagnostics.topExpense && (
-              <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-xs text-rose-900 dark:text-rose-200 flex items-start gap-2">
-                <AlertTriangle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
-                <div>
-                  <span className="font-bold">Principal causador da pressão no orçamento: </span>
-                  "{categoryDiagnostics.topExpense.description}" ({formatCurrency(categoryDiagnostics.topExpense.amount)}) em {categoryDiagnostics.topExpense.date.split('-').reverse().join('/')}.
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Special card for Comida & Conveniência */}
-      {selectedCategory === 'comida' && (
-        <FoodPacingWeeklyCard
-          onOpenExpenseModal={(cat, date, toEdit, isDivided) =>
-            onOpenExpenseModal(cat || 'comida', date, toEdit, isDivided)
-          }
-        />
-      )}
-
-      {/* Filters bar: Payer and Scope */}
-      <div className="space-y-2">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white dark:bg-slate-900 p-3 sm:p-3.5 rounded-2xl border border-slate-200/80 dark:border-slate-800 text-xs transition-colors">
-          <span className="font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1.5 whitespace-nowrap">
-            <Filter className="w-3.5 h-3.5 text-accent-primary" />
-            Divisão do casal:
+          <span className="text-[11px] font-bold uppercase tracking-wider text-teal-800 dark:text-teal-300 flex items-center gap-1.5">
+            <Home className="w-3.5 h-3.5" />
+            Trava de Moradia (Meta ≤ 30%)
           </span>
-          <div className="flex items-center gap-1.5 flex-wrap">
-            <button
-              onClick={() => setFilterPaidBy('all')}
-              className={`px-3 py-1.5 rounded-xl font-bold transition-colors whitespace-nowrap ${
-                filterPaidBy === 'all'
-                  ? 'bg-slate-900 dark:bg-white text-white dark:text-slate-900'
-                  : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
-              }`}
-            >
-              Todos
-            </button>
-            <button
-              onClick={() => setFilterPaidBy('both')}
-              className={`px-3 py-1.5 rounded-xl font-bold transition-colors whitespace-nowrap flex items-center gap-1 ${
-                filterPaidBy === 'both'
-                  ? 'bg-purple-700 text-white'
-                  : 'text-purple-700 dark:text-purple-400 hover:bg-purple-50 dark:hover:bg-purple-950/60'
-              }`}
-            >
-              <Users className="w-3 h-3" />
-              Em Conjunto
-            </button>
-            <button
-              onClick={() => setFilterPaidBy('partner1')}
-              className={`px-3 py-1.5 rounded-xl font-bold transition-colors whitespace-nowrap flex items-center gap-1 ${
-                filterPaidBy === 'partner1'
-                  ? 'bg-accent-primary text-white'
-                  : 'text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-              }`}
-            >
-              <User className="w-3 h-3" />
-              Só {state.profile.partner1Name}
-            </button>
-            <button
-              onClick={() => setFilterPaidBy('partner2')}
-              className={`px-3 py-1.5 rounded-xl font-bold transition-colors whitespace-nowrap flex items-center gap-1 ${
-                filterPaidBy === 'partner2'
-                  ? 'bg-blue-600 text-white'
-                  : 'text-blue-700 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/60'
-              }`}
-            >
-              <User className="w-3 h-3" />
-              Só {state.profile.partner2Name}
-            </button>
+          <div className="text-xl sm:text-2xl font-black text-slate-900 dark:text-white tabular-nums">
+            {formatCurrency(waterfallResult.guards.housing.total)}
           </div>
+          <p className="text-[11px] text-slate-600 dark:text-slate-300 tabular-nums">
+            {housingPct}% da renda · Teto {formatCurrency(waterfallResult.guards.housing.capAmount)}
+          </p>
         </div>
 
-        {/* Nature of expenditure filter (Rotina, Metas, Excepcional) */}
-        <div className="flex items-center gap-1.5 overflow-x-auto text-xs px-1">
-          <span className="text-slate-400 text-[11px] font-medium mr-1 shrink-0">Natureza:</span>
-          <button
-            onClick={() => setFilterScope('all')}
-            className={`px-2.5 py-1 rounded-lg font-medium transition-colors whitespace-nowrap ${
-              filterScope === 'all'
-                ? 'bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-slate-200'
-                : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800'
-            }`}
-          >
-            Todas as Fontes
-          </button>
-          <button
-            onClick={() => setFilterScope('routine')}
-            className={`px-2.5 py-1 rounded-lg font-medium transition-colors whitespace-nowrap ${
-              filterScope === 'routine'
-                ? 'bg-teal-100 dark:bg-teal-950 text-teal-800 dark:text-teal-200 border border-teal-200 dark:border-teal-800'
-                : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800'
-            }`}
-          >
-            🟢 Orçamento Rotina
-          </button>
-          <button
-            onClick={() => setFilterScope('planned')}
-            className={`px-2.5 py-1 rounded-lg font-medium transition-colors whitespace-nowrap ${
-              filterScope === 'planned'
-                ? 'bg-blue-100 dark:bg-blue-950 text-blue-800 dark:text-blue-200 border border-blue-200 dark:border-blue-800'
-                : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800'
-            }`}
-          >
-            🎯 Caixinhas / Metas
-          </button>
-          <button
-            onClick={() => setFilterScope('exceptional')}
-            className={`px-2.5 py-1 rounded-lg font-medium transition-colors whitespace-nowrap ${
-              filterScope === 'exceptional'
-                ? 'bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-200 border border-amber-200 dark:border-amber-800'
-                : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800'
-            }`}
-          >
-            ⚡ Excepcional / Reserva
-          </button>
+        <div className="clay-card p-4 sm:p-5 rounded-3xl bg-amber-50/50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800 space-y-1">
+          <span className="text-[11px] font-bold uppercase tracking-wider text-amber-800 dark:text-amber-300 flex items-center gap-1.5">
+            <ShieldCheck className="w-3.5 h-3.5" />
+            Fixos Canceláveis (Fora da Reserva)
+          </span>
+          <div className="text-xl sm:text-2xl font-black text-slate-900 dark:text-white tabular-nums">
+            {formatCurrency(bucketBreakdown.fixed_cancelable || 0)}
+          </div>
+          <p className="text-[11px] text-slate-600 dark:text-slate-300">
+            Excluído do cálculo da base essencial do Escudo
+          </p>
         </div>
       </div>
 
-      {/* Active Installments section in this category */}
-      {categoryInstallments.length > 0 && (
+      {/* 6 Sub-Envelopes Grid */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
+        {BUCKET_ORDER.map((bKey) => {
+          const meta = TRANSACTION_BUCKET_META[bKey];
+          const amount = bucketBreakdown[bKey] || 0;
+          const active = selectedBucket === bKey;
+          return (
+            <button
+              key={bKey}
+              type="button"
+              onClick={() => setSelectedBucket(active ? 'all' : bKey)}
+              className={`min-h-[76px] p-3.5 rounded-2xl border text-left transition-all cursor-pointer ${
+                active
+                  ? 'bg-slate-900 dark:bg-white text-white dark:text-slate-900 border-slate-900 dark:border-white shadow-sm'
+                  : 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white border-slate-200 dark:border-slate-800 hover:border-slate-400'
+              }`}
+            >
+              <div className="text-[11px] font-bold opacity-80 truncate">{meta.label}</div>
+              <div className="text-base font-black tabular-nums mt-1">{formatCurrency(amount)}</div>
+              <div className="text-[10px] opacity-70 mt-0.5 truncate">
+                {meta.isEssentialForShield ? 'Escudo' : 'Fora da Reserva'}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Bucket & Nature Filter Strip */}
+      <div className="flex flex-wrap items-center justify-between gap-3 bg-white dark:bg-slate-900 p-3.5 rounded-2xl border border-slate-200/80 dark:border-slate-800 text-xs">
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <button
+            type="button"
+            onClick={() => setSelectedBucket('all')}
+            className={`min-h-[36px] px-3 py-1 rounded-xl font-bold transition-colors cursor-pointer ${
+              selectedBucket === 'all'
+                ? 'bg-slate-900 dark:bg-white text-white dark:text-slate-900'
+                : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+            }`}
+          >
+            Todos os Sub-Envelopes
+          </button>
+          {BUCKET_ORDER.map((bKey) => (
+            <button
+              key={bKey}
+              type="button"
+              onClick={() => setSelectedBucket(bKey)}
+              className={`min-h-[36px] px-3 py-1 rounded-xl font-bold transition-colors cursor-pointer ${
+                selectedBucket === bKey
+                  ? 'bg-sky-700 text-white'
+                  : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+              }`}
+            >
+              {TRANSACTION_BUCKET_META[bKey].shortLabel}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {([
+            { id: 'all', label: 'Todas as fontes' },
+            { id: 'routine', label: 'Caixa Único' },
+            { id: 'planned', label: 'Metas' },
+            { id: 'exceptional', label: 'Excesso Escudo' },
+          ] as const).map((opt) => (
+            <button
+              key={opt.id}
+              type="button"
+              onClick={() => setFilterScope(opt.id)}
+              className={`min-h-[36px] px-2.5 py-1 rounded-lg font-semibold transition-colors cursor-pointer ${
+                filterScope === opt.id
+                  ? 'bg-slate-200 dark:bg-slate-700 text-slate-900 dark:text-white'
+                  : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800'
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Active Installment Plans in Cycle */}
+      {activePlansInCycle.length > 0 && selectedBucket === 'all' && (
         <div className="bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200/80 dark:border-amber-800/60 rounded-3xl p-5 space-y-3">
           <div className="flex items-center gap-2">
             <CreditCard className="w-4 h-4 text-amber-800 dark:text-amber-400" />
             <h4 className="text-xs font-bold text-amber-900 dark:text-amber-300 uppercase tracking-wider">
-              Parcelas que entram automaticamente neste mês
+              Parcelas da Casa ativas neste ciclo ({activePlansInCycle.length})
             </h4>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-            {categoryInstallments.map(inst => {
-              const cat = getCategoryInfo(inst.category);
-              const split = getExpenseSplit(
-                inst.installmentAmount,
-                inst.paidBy
-              );
-
-              return (
-                <div
-                  key={inst.id}
-                  className="bg-white dark:bg-slate-900 p-3.5 rounded-2xl border border-amber-200 dark:border-amber-900/60 flex items-center justify-between text-xs"
-                >
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <span className="text-lg">{cat.emoji}</span>
-                    <div className="min-w-0">
-                      <div className="font-bold text-slate-900 dark:text-white truncate">{inst.title}</div>
-                      <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
-                        {inst.paidInstallmentsCount}/{inst.installmentsCount} parcelas · {split.label}
-                      </div>
-                    </div>
+            {activePlansInCycle.map((plan, idx) => (
+              <div
+                key={plan.id || idx}
+                className="bg-white dark:bg-slate-900 p-3.5 rounded-2xl border border-amber-200 dark:border-amber-900/60 flex items-center justify-between text-xs"
+              >
+                <div className="min-w-0">
+                  <div className="font-bold text-slate-900 dark:text-white truncate">
+                    {plan.title}
                   </div>
-                  <div className="text-right shrink-0 font-bold text-amber-900 dark:text-amber-300 tabular-nums">
-                    {formatCurrency(inst.installmentAmount)}
+                  <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                    {plan.currentInstallment}/{plan.totalInstallments} parcelas · Caixa Único
                   </div>
                 </div>
-              );
-            })}
+                <div className="font-bold text-amber-900 dark:text-amber-300 tabular-nums shrink-0">
+                  {formatCurrency(plan.installmentAmount)}
+                </div>
+              </div>
+            ))}
           </div>
         </div>
       )}
 
-      {/* List of Direct Expenses */}
-      <div className="bg-white dark:bg-slate-900 rounded-3xl p-5 sm:p-6 border border-slate-200/90 dark:border-slate-800 shadow-xs space-y-3 transition-colors">
+      {/* Combined Ledger: v2.3 Reclassifiable Transactions + Legacy House Expenses */}
+      <div className="bg-white dark:bg-slate-900 rounded-3xl p-5 sm:p-6 border border-slate-200/90 dark:border-slate-800 shadow-xs space-y-3">
         <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
           <h3 className="font-bold text-slate-900 dark:text-white text-base font-display">
-            Lançamentos ({filteredExpenses.length})
+            Lançamentos da Estrutura ({filteredV23.length + filteredExpenses.length})
           </h3>
           <button
-            onClick={() => onOpenExpenseModal((selectedCategory in CATEGORIES_BASE) ? (selectedCategory as CategoryKey) : undefined)}
-            className="flex items-center gap-1 text-xs font-bold text-accent-themed hover:underline transition-colors"
+            type="button"
+            onClick={() => onOpenExpenseModal()}
+            className="flex items-center gap-1 text-xs font-bold text-accent-themed hover:underline cursor-pointer"
           >
             <Plus className="w-3.5 h-3.5" />
             Novo Gasto
           </button>
         </div>
 
-        {filteredExpenses.length === 0 ? (
+        {filteredV23.length === 0 && filteredExpenses.length === 0 ? (
           <div className="text-center py-10 space-y-2">
-            <span className="text-3xl block">🍃</span>
-            <p className="text-sm font-semibold text-slate-700 dark:text-slate-300">Nenhum gasto anotado com esse filtro</p>
-            <p className="text-xs text-slate-400">
-              Use o botão GASTEI para registrar compras em menos de 10 segundos!
+            <Sparkles className="w-7 h-7 mx-auto text-slate-400" />
+            <p className="text-sm font-semibold text-slate-700 dark:text-slate-300">
+              Nenhum lançamento encontrado neste sub-envelope
+            </p>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              Use o botão Registrar para lançar em menos de 5 segundos.
             </p>
           </div>
         ) : (
           <div className="divide-y divide-slate-100 dark:divide-slate-800">
-            {filteredExpenses.map(item => {
-              const cat = getCategoryInfo(item.category);
-              const split = getExpenseSplit(
-                item.amount,
-                item.paidBy
+            {filteredV23.map((tx) => {
+              const meta = TRANSACTION_BUCKET_META[tx.bucket];
+              return (
+                <div
+                  key={tx.id || `${tx.title}-${tx.date}`}
+                  className="py-3.5 flex flex-wrap items-center justify-between gap-3"
+                >
+                  <div className="min-w-0">
+                    <div className="font-bold text-slate-900 dark:text-white text-sm truncate">
+                      {tx.title}
+                    </div>
+                    <div className="text-xs text-slate-500 dark:text-slate-400 flex items-center gap-2 flex-wrap mt-0.5">
+                      <span>{tx.date.split('-').reverse().join('/')}</span>
+                      <span>·</span>
+                      <span>Caixa Único</span>
+                      {!meta.isEssentialForShield && (
+                        <span className="text-amber-700 dark:text-amber-300 font-semibold">
+                          · Fora da Reserva
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    {tx.id && (
+                      <select
+                        aria-label={`Sub-envelope de ${tx.title}`}
+                        value={tx.bucket}
+                        onChange={(e) =>
+                          void reclassifyTransactionBucket(
+                            tx.id!,
+                            e.target.value as TransactionBucket
+                          )
+                        }
+                        className="min-h-[36px] px-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-semibold text-slate-800 dark:text-slate-100"
+                      >
+                        {BUCKET_ORDER.map((bKey) => (
+                          <option key={bKey} value={bKey}>
+                            {TRANSACTION_BUCKET_META[bKey].label}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+
+                    <div className="font-extrabold text-slate-900 dark:text-white text-sm sm:text-base tabular-nums">
+                      {formatCurrency(tx.amount)}
+                    </div>
+                  </div>
+                </div>
               );
+            })}
 
-              const isFundedByPiggy = item.fundingSource === 'piggy_bank';
-              const isFundedByReserve = item.fundingSource === 'reserve_excess';
-
+            {filteredExpenses.map((item) => {
+              const cat = getCategoryInfo(item.category);
+              const bucket = mapCategoryToBucket(item.category, item.nature, item.priority);
+              const meta = TRANSACTION_BUCKET_META[bucket];
               return (
                 <div
                   key={item.id}
@@ -728,106 +428,39 @@ export const CategoryDetailsScreen: React.FC<CategoryDetailsScreenProps> = ({
                       {cat.emoji}
                     </span>
                     <div className="min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="font-bold text-slate-900 dark:text-white text-sm truncate">
-                          {item.description}
-                        </span>
-                        {item.store && (
-                          <span className="text-[11px] text-slate-500 dark:text-slate-400 font-normal">
-                            ({item.store})
-                          </span>
-                        )}
-                        {item.splits && item.splits.length > 0 && (
-                          <span className="px-2 py-0.5 rounded-full text-[9px] font-bold bg-purple-50 dark:bg-purple-950 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800 shrink-0">
-                            ✂️ Dividida ({item.splits.length} grupos)
-                          </span>
-                        )}
-                        {selectedCategory !== 'all' && item.splits && item.splits.length > 0 && (() => {
-                          const catSplitSum = item.splits
-                            .filter((s) => s.category === selectedCategory)
-                            .reduce((sum, s) => sum + (s.amountCents ? s.amountCents / 100 : s.amount), 0);
-                          return (
-                            <span className="text-[10px] font-semibold text-purple-600 dark:text-purple-400">
-                              (Nesta categoria: {formatCurrency(catSplitSum)})
-                            </span>
-                          );
-                        })()}
-                        {cat.isLegacy && (
-                          <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-200">
-                            Revisar
-                          </span>
-                        )}
+                      <div className="font-bold text-slate-900 dark:text-white text-sm truncate">
+                        {item.description}
                       </div>
-
                       <div className="text-xs text-slate-500 dark:text-slate-400 flex items-center gap-2 flex-wrap mt-0.5">
-                        <span className="font-medium text-slate-600 dark:text-slate-300">{cat.name}</span>
+                        <span className="font-semibold text-slate-700 dark:text-slate-300">
+                          {meta.label}
+                        </span>
                         <span>·</span>
                         <span>{item.date.split('-').reverse().join('/')}</span>
                         <span>·</span>
-
-                        {/* Badges de Fonte de Financiamento */}
-                        {isFundedByPiggy && (
-                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-teal-50 dark:bg-teal-950 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-800 flex items-center gap-1">
-                            <span>🎯</span>
-                            {item.fundingGoalName || 'Caixinha'}
-                          </span>
-                        )}
-                        {isFundedByReserve && (
-                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 dark:bg-amber-950 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-800 flex items-center gap-1">
-                            <span>🛡️</span>
-                            Excesso Reserva
-                          </span>
-                        )}
-
-                        {/* Who Paid Badge — TODO(Etapa 4): Migrar UI para v2.3 */}
-                        {item.paidBy === 'partner1' ? (
-                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-accent-surface text-accent-themed border border-accent-themed">
-                            Só {state.profile.partner1Name} (100%)
-                          </span>
-                        ) : item.paidBy === 'partner2' ? (
-                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
-                            Só {state.profile.partner2Name} (100%)
-                          </span>
-                        ) : (
-                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-purple-50 dark:bg-purple-950 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800 flex items-center gap-1">
-                            <span>🤝</span>
-                            Caixa Único (Casal)
-                          </span>
-                        )}
+                        <span>Caixa Único (Casa)</span>
                       </div>
                     </div>
                   </div>
 
                   <div className="flex items-center gap-3 shrink-0">
-                    <div className="text-right">
-                      <div className="font-extrabold text-slate-900 dark:text-white text-sm sm:text-base tabular-nums">
-                        {formatCurrency(item.amount)}
-                      </div>
-                      {split.isSplit && (
-                        <div className="text-[10px] text-slate-400">
-                          {formatCurrency(split.partner1Amount)} + {formatCurrency(split.partner2Amount)}
-                        </div>
-                      )}
+                    <div className="font-extrabold text-slate-900 dark:text-white text-sm sm:text-base tabular-nums">
+                      {formatCurrency(item.amount)}
                     </div>
-
-                    <div className="flex items-center gap-1 opacity-80 group-hover:opacity-100 transition-opacity">
+                    <div className="flex items-center gap-1">
                       <button
-                        onClick={() => {
-                          if (item.splits && item.splits.length > 0) {
-                            onOpenExpenseModal(undefined, undefined, item);
-                          } else {
-                            setEditingExpense(item);
-                          }
-                        }}
-                        className="w-8 h-8 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 flex items-center justify-center transition-colors"
-                        title="Editar gasto ou divisão"
+                        type="button"
+                        onClick={() => setEditingExpense(item)}
+                        className="w-9 h-9 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 flex items-center justify-center transition-colors cursor-pointer"
+                        title="Editar lançamento"
                       >
                         <Edit2 className="w-3.5 h-3.5" />
                       </button>
                       <button
+                        type="button"
                         onClick={() => deleteExpense(item.id)}
-                        className="w-8 h-8 rounded-xl hover:bg-rose-50 dark:hover:bg-rose-950/60 text-slate-400 hover:text-rose-600 flex items-center justify-center transition-colors"
-                        title="Excluir gasto"
+                        className="w-9 h-9 rounded-xl hover:bg-rose-50 dark:hover:bg-rose-950/60 text-slate-400 hover:text-rose-600 flex items-center justify-center transition-colors cursor-pointer"
+                        title="Excluir lançamento"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
@@ -840,168 +473,22 @@ export const CategoryDetailsScreen: React.FC<CategoryDetailsScreenProps> = ({
         )}
       </div>
 
-      {/* MODAL: Simular Remanejamento de Tetos */}
-      {isSimulatingCeiling && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-sm animate-in fade-in">
-          <div className="w-full max-w-xl bg-white dark:bg-slate-900 rounded-3xl p-6 shadow-2xl space-y-5 border border-slate-200 dark:border-slate-800 max-h-[90vh] overflow-y-auto">
+      {/* Clean Edit Modal (Caixa Único — zero partner split) */}
+      {editingExpense && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-sm">
+          <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl p-6 shadow-2xl space-y-4 border border-slate-200 dark:border-slate-800">
             <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <div className="w-9 h-9 rounded-2xl bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 flex items-center justify-center font-bold">
-                  ⚖️
-                </div>
-                <div>
-                  <h3 className="font-bold text-slate-900 dark:text-white text-base font-display">
-                    Simulador de Remanejamento de Tetos
-                  </h3>
-                  <p className="text-xs text-slate-500 dark:text-slate-400">
-                    Ajuste os limites das categorias para o mês sem inventar gastos artificiais.
-                  </p>
-                </div>
-              </div>
+              <h3 className="font-bold text-slate-900 dark:text-white text-lg font-display">
+                Editar Lançamento da Casa
+              </h3>
               <button
-                onClick={() => setIsSimulatingCeiling(false)}
-                className="w-8 h-8 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 flex items-center justify-center"
+                type="button"
+                onClick={() => setEditingExpense(null)}
+                className="w-8 h-8 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center text-slate-400"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
-
-            <div className="space-y-3">
-              {(Object.keys(CATEGORIES_BASE) as CategoryKey[]).map(key => {
-                const cat = getCategoryInfo(key);
-                const currentPct = simulatedPercentages[key] ?? 0;
-                const spend = categoriesSpending[key];
-                const simBudget = (totalIncome * currentPct) / 100;
-                const simRemaining = simBudget - spend.spent;
-                const isOver = simRemaining < 0;
-
-                return (
-                  <div
-                    key={key}
-                    className={`p-3.5 rounded-2xl border transition-all ${
-                      isOver
-                        ? 'bg-rose-50/40 dark:bg-rose-950/20 border-rose-200 dark:border-rose-900'
-                        : 'bg-slate-50/60 dark:bg-slate-800/40 border-slate-200/80 dark:border-slate-800'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between text-xs mb-2">
-                      <div className="flex items-center gap-2">
-                        <span className="text-base">{cat.emoji}</span>
-                        <span className="font-bold text-slate-900 dark:text-white">{cat.name}</span>
-                      </div>
-                      <div className="flex items-center gap-2 font-bold tabular-nums">
-                        <span className="text-slate-500">Teto: {formatCurrency(simBudget)}</span>
-                        <span className={isOver ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600 dark:text-emerald-400'}>
-                          {isOver ? `Estouro: ${formatCurrency(Math.abs(simRemaining))}` : `Sobra: ${formatCurrency(simRemaining)}`}
-                        </span>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-3">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setSimulatedPercentages(prev => ({
-                            ...prev,
-                            [key]: Math.max(0, currentPct - 1),
-                          }))
-                        }
-                        className="w-7 h-7 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 font-bold text-xs hover:bg-slate-100 flex items-center justify-center shrink-0"
-                      >
-                        -1%
-                      </button>
-
-                      <input
-                        type="range"
-                        min="0"
-                        max="60"
-                        value={currentPct}
-                        onChange={e => {
-                          const val = parseInt(e.target.value, 10) || 0;
-                          setSimulatedPercentages(prev => ({
-                            ...prev,
-                            [key]: val,
-                          }));
-                        }}
-                        className="w-full accent-amber-600"
-                      />
-
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setSimulatedPercentages(prev => ({
-                            ...prev,
-                            [key]: currentPct + 1,
-                          }))
-                        }
-                        className="w-7 h-7 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 font-bold text-xs hover:bg-slate-100 flex items-center justify-center shrink-0"
-                      >
-                        +1%
-                      </button>
-
-                      <span className="w-12 text-right font-black text-xs text-slate-900 dark:text-white tabular-nums shrink-0">
-                        {currentPct}%
-                      </span>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-
-            {/* Total percentage indicator */}
-            <div className="p-3 rounded-2xl bg-slate-100 dark:bg-slate-800 text-xs flex items-center justify-between font-bold">
-              <span className="text-slate-600 dark:text-slate-300">Total de Despesas Alocado:</span>
-              <span className="text-slate-900 dark:text-white tabular-nums">
-                {Object.values(simulatedPercentages).reduce((a, b) => a + b, 0)}%
-              </span>
-            </div>
-
-            <div className="flex items-center justify-between gap-3 pt-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setSimulatedPercentages({
-                    moradia: activeLifeTier.percentages.moradia || 30,
-                    transporte: activeLifeTier.percentages.transporte || 10,
-                    comida: activeLifeTier.percentages.comida || 15,
-                    lazer: activeLifeTier.percentages.lazer || 10,
-                    protecao: activeLifeTier.percentages.protecao || 10,
-                    profissional: activeLifeTier.percentages.profissional || 5,
-                  });
-                }}
-                className="px-3.5 py-2 text-xs font-bold text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
-              >
-                Restaurar Padrão do Degrau
-              </button>
-
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setIsSimulatingCeiling(false)}
-                  className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="button"
-                  onClick={handleApplySimulatedCeilings}
-                  className="btn-primary-accent px-5 py-2 rounded-xl text-xs font-bold text-white shadow-xs"
-                >
-                  Confirmar Novos Tetos
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Edit Expense Modal with Percentage, Funding Source and Payer Controls */}
-      {editingExpense && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-sm animate-in fade-in">
-          <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl p-6 shadow-2xl space-y-4 border border-slate-200 dark:border-slate-800 max-h-[90vh] overflow-y-auto">
-            <h3 className="font-bold text-slate-900 dark:text-white text-lg font-display">
-              Editar Gasto, Fonte & Divisão
-            </h3>
 
             <form onSubmit={handleSaveEdit} className="space-y-4">
               {editError && (
@@ -1020,10 +507,10 @@ export const CategoryDetailsScreen: React.FC<CategoryDetailsScreenProps> = ({
                 <input
                   type="text"
                   value={editingExpense.description}
-                  onChange={e =>
+                  onChange={(e) =>
                     setEditingExpense({ ...editingExpense, description: e.target.value })
                   }
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white text-sm focus:ring-2 focus:ring-accent-primary"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white text-sm"
                   required
                 />
               </div>
@@ -1036,179 +523,77 @@ export const CategoryDetailsScreen: React.FC<CategoryDetailsScreenProps> = ({
                   type="number"
                   step="0.01"
                   value={editingExpense.amount}
-                  onChange={e => {
+                  onChange={(e) => {
                     const nextVal = parseFloat(e.target.value) || 0;
                     setEditingExpense({
                       ...editingExpense,
                       amount: nextVal,
                       amountCents: Math.round(nextVal * 100),
                     });
-                    if (editError) setEditError('');
                   }}
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white text-sm focus:ring-2 focus:ring-accent-primary"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white text-sm tabular-nums"
                   required
                 />
               </div>
 
               <div>
                 <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">
-                  Área / Categoria
+                  Categoria / Envelope
                 </label>
                 <select
                   value={editingExpense.category}
-                  onChange={e =>
+                  onChange={(e) =>
                     setEditingExpense({
                       ...editingExpense,
                       category: e.target.value as CategoryKey,
                     })
                   }
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-sm bg-white dark:bg-slate-800 text-slate-900 dark:text-white focus:ring-2 focus:ring-accent-primary"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-sm bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
                 >
-                  {(Object.keys(CATEGORIES_BASE) as CategoryKey[]).map(key => (
+                  {(Object.keys(CATEGORIES_BASE) as CategoryKey[]).map((key) => (
                     <option key={key} value={key}>
                       {CATEGORIES_BASE[key].emoji} {CATEGORIES_BASE[key].name}
                     </option>
                   ))}
-                  {/* Option for legacy category if currently selected */}
-                  {editingExpense.category && !CATEGORIES_BASE[editingExpense.category as CategoryKey] && (
-                    <option value={editingExpense.category}>
-                      🏷️ {editingExpense.category} (Legada)
-                    </option>
-                  )}
                 </select>
               </div>
 
-              {/* Fonte de Financiamento */}
               <div>
                 <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">
                   Fonte de Financiamento
                 </label>
                 <select
                   value={editingExpense.fundingSource || 'month_budget'}
-                  onChange={e => {
+                  onChange={(e) => {
                     const src = e.target.value as FundingSourceType;
                     setEditingExpense({
                       ...editingExpense,
                       fundingSource: src,
                       isExcludedFromMonthlyBudget: src !== 'month_budget',
-                      fundingGoalId: src === 'piggy_bank' ? editingExpense.fundingGoalId : undefined,
-                      fundingGoalName: src === 'piggy_bank' ? editingExpense.fundingGoalName : undefined,
                     });
                   }}
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-sm bg-white dark:bg-slate-800 text-slate-900 dark:text-white focus:ring-2 focus:ring-accent-primary"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-sm bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
                 >
-                  <option value="month_budget">Orçamento do Mês (Rotina da Casa)</option>
-                  <option value="piggy_bank">Caixinha / Cofrinho de Objetivo</option>
-                  <option value="reserve_excess">Excesso da Reserva (acima de 3 meses)</option>
-                  <option value="personal_allowance">Mesada Individual</option>
+                  <option value="month_budget">Caixa Único (Casa & Rotina)</option>
+                  <option value="piggy_bank">Meta / Sonho</option>
+                  <option value="reserve_excess">Gordura do Escudo</option>
                 </select>
               </div>
 
-              {/* Se a fonte for Caixinha, selecionar qual */}
-              {editingExpense.fundingSource === 'piggy_bank' && (
-                <div>
-                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">
-                    Qual Caixinha / Cofrinho?
-                  </label>
-                  <select
-                    value={editingExpense.fundingGoalId || ''}
-                    onChange={e => {
-                      const goalId = e.target.value;
-                      const goal = state.piggyBanks.find(g => g.id === goalId);
-                      setEditingExpense({
-                        ...editingExpense,
-                        fundingGoalId: goalId,
-                        fundingGoalName: goal?.name || '',
-                      });
-                      if (editError) setEditError('');
-                    }}
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-sm bg-white dark:bg-slate-800 text-slate-900 dark:text-white focus:ring-2 focus:ring-accent-primary"
-                  >
-                    <option value="">Selecione uma caixinha...</option>
-                    {state.piggyBanks
-                      .filter(g => (!g.archived && !g.isDeleted) || g.id === editingExpense.fundingGoalId)
-                      .map(g => (
-                        <option key={g.id} value={g.id}>
-                          {g.name} (Saldo: {formatCurrency(g.currentAmount)})
-                        </option>
-                      ))}
-                  </select>
-                </div>
-              )}
-
-              {/* Origem — TODO(Etapa 4): Migrar UI para v2.3 (Caixa Único vs Mesada Híbrida) */}
-              <div>
-                <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">
-                  Origem do Lançamento
-                </label>
-                <div className="grid grid-cols-3 gap-2">
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setEditingExpense({
-                        ...editingExpense,
-                        paidBy: 'both',
-                      })
-                    }
-                    className={`p-2 rounded-xl text-xs font-bold border transition-colors ${
-                      editingExpense.paidBy === 'both'
-                        ? 'border-purple-600 bg-purple-50 dark:bg-purple-950/60 text-purple-900 dark:text-purple-200'
-                        : 'border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300'
-                    }`}
-                  >
-                    🤝 Caixa Único
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setEditingExpense({
-                        ...editingExpense,
-                        paidBy: 'partner1',
-                      })
-                    }
-                    className={`p-2 rounded-xl text-xs font-bold border transition-colors ${
-                      editingExpense.paidBy === 'partner1'
-                        ? 'border-emerald-600 bg-accent-surface text-accent-themed'
-                        : 'border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300'
-                    }`}
-                  >
-                    Só {state.profile.partner1Name}
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setEditingExpense({
-                        ...editingExpense,
-                        paidBy: 'partner2',
-                      })
-                    }
-                    className={`p-2 rounded-xl text-xs font-bold border transition-colors ${
-                      editingExpense.paidBy === 'partner2'
-                        ? 'border-blue-600 bg-blue-50 dark:bg-blue-950/60 text-blue-900 dark:text-blue-200'
-                        : 'border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300'
-                    }`}
-                  >
-                    Só {state.profile.partner2Name}
-                  </button>
-                </div>
-              </div>
-
-              <div className="flex items-center justify-end gap-2 pt-3">
+              <div className="flex items-center justify-end gap-2 pt-2">
                 <button
                   type="button"
                   onClick={() => {
                     setEditingExpense(null);
                     setEditError('');
                   }}
-                  className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+                  className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
                 >
                   Cancelar
                 </button>
                 <button
                   type="submit"
-                  className="btn-primary-accent px-5 py-2 rounded-xl text-xs font-bold text-white shadow-xs"
+                  className="btn-accent px-5 py-2 rounded-xl text-xs font-bold"
                 >
                   Salvar Alterações
                 </button>
@@ -1217,18 +602,6 @@ export const CategoryDetailsScreen: React.FC<CategoryDetailsScreenProps> = ({
           </div>
         </div>
       )}
-      {/* Modal de Reequilíbrio Orçamentário com Travas */}
-      <BudgetRebalanceModal
-        isOpen={isSimulatingCeiling}
-        onClose={() => setIsSimulatingCeiling(false)}
-      />
-
-      {/* Modal de Reforço Temporário de Orçamento */}
-      <CategoryReinforcementModal
-        isOpen={isReinforcementModalOpen}
-        onClose={() => setIsReinforcementModalOpen(false)}
-        initialCategory={selectedCategory !== 'all' && selectedCategory in CATEGORIES_BASE ? (selectedCategory as CategoryKey) : undefined}
-      />
     </div>
   );
 };

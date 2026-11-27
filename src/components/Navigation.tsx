@@ -87,9 +87,8 @@ export const Navigation: React.FC<NavigationProps> = ({
     { id: 'home', label: 'Início', icon: <Home className="w-4 h-4 shrink-0" /> },
     {
       id: 'couple_hub',
-      label: 'Nosso espaço',
-      icon: <Users className="w-4 h-4 shrink-0 text-rose-500" />,
-
+      label: 'Mesada',
+      icon: <Users className="w-4 h-4 shrink-0 text-violet-500" />,
     },
     {
       id: 'calendar',
@@ -231,7 +230,7 @@ export const Navigation: React.FC<NavigationProps> = ({
                     </span>
                   )}
                   {item.warning && (
-                    <span className="w-2.5 h-2.5 rounded-full bg-rose-500 animate-pulse" />
+                    <span className="w-2 h-2 rounded-full bg-rose-500" />
                   )}
                 </div>
               </button>
@@ -331,7 +330,7 @@ export const Navigation: React.FC<NavigationProps> = ({
               >
                 <Bell className="w-4 h-4" />
                 {unreadNotificationsCount > 0 && (
-                  <span className="absolute top-1 right-1 w-3.5 h-3.5 rounded-full bg-rose-500 text-white text-[9px] font-bold flex items-center justify-center animate-pulse">
+                  <span className="absolute top-1 right-1 w-3.5 h-3.5 rounded-full bg-rose-500 text-white text-[9px] font-bold flex items-center justify-center">
                     {unreadNotificationsCount}
                   </span>
                 )}
@@ -397,7 +396,7 @@ export const Navigation: React.FC<NavigationProps> = ({
             >
               <Bell className="w-4 h-4" />
               {unreadNotificationsCount > 0 && (
-                <span className="absolute top-1 right-1 w-2.5 h-2.5 rounded-full bg-rose-500 animate-pulse" />
+                <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-rose-500" />
               )}
             </button>
 
@@ -474,7 +473,7 @@ export const Navigation: React.FC<NavigationProps> = ({
             <div className="relative">
               <PieChart className="w-4 h-4 stroke-[2.5]" />
               {blownCategories.length > 0 && (
-                <span className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-rose-500 animate-pulse" />
+                <span className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-rose-500" />
               )}
             </div>
             <span className="text-[10px] tracking-tight mt-0.5 truncate">Gastos</span>
@@ -625,29 +624,27 @@ export const Navigation: React.FC<NavigationProps> = ({
             <div className="grid grid-cols-2 gap-2.5">
               <button
                 onClick={() => handleMobileNav('couple_hub')}
-                className="p-3.5 rounded-2xl bg-rose-50 dark:bg-rose-950/70 border-2 border-rose-300 dark:border-rose-700 flex flex-col items-center text-center gap-1.5 col-span-2 shadow-xs cursor-pointer active:scale-98 transition-transform"
+                className="p-3.5 rounded-2xl bg-violet-50 dark:bg-violet-950/60 border border-violet-200 dark:border-violet-800 flex flex-col items-center text-center gap-1.5 col-span-2 cursor-pointer active:scale-98 transition-transform"
               >
-                <div className="flex items-center gap-2 text-rose-900 dark:text-rose-200 font-extrabold text-sm">
-                  <Users className="w-5 h-5 text-rose-600 dark:text-rose-400 stroke-[2.5]" />
-                  <span>Hub do Casal</span>
-                  <span className="text-[10px] bg-rose-200 dark:bg-rose-800 text-rose-900 dark:text-rose-100 px-2 py-0.5 rounded-full font-black uppercase"></span>
+                <div className="flex items-center gap-2 text-violet-900 dark:text-violet-200 font-extrabold text-sm">
+                  <Users className="w-5 h-5 text-violet-600 dark:text-violet-400 stroke-[2.5]" />
+                  <span>Mesada</span>
                 </div>
-                <span className="text-[11px] text-rose-700 dark:text-rose-300 font-medium">
-                  Metas, prioridades e contas de vocês
+                <span className="text-[11px] text-violet-700 dark:text-violet-300 font-medium">
+                  Carteira privada, Turbo e gastos a dois (50/50)
                 </span>
               </button>
 
               <button
                 onClick={() => handleMobileNav('shifts')}
-                className="p-3.5 rounded-2xl bg-teal-50 dark:bg-teal-950/70 border-2 border-teal-300 dark:border-teal-700 flex flex-col items-center text-center gap-1.5 col-span-2 shadow-xs cursor-pointer active:scale-98 transition-transform"
+                className="p-3.5 rounded-2xl bg-teal-50 dark:bg-teal-950/70 border border-teal-200 dark:border-teal-800 flex flex-col items-center text-center gap-1.5 col-span-2 cursor-pointer active:scale-98 transition-transform"
               >
                 <div className="flex items-center gap-2 text-teal-800 dark:text-teal-200 font-extrabold text-sm">
                   <Stethoscope className="w-5 h-5 text-teal-600 dark:text-teal-300 stroke-[2.5]" />
                   <span>Plantões Médicos</span>
-                  <span className="text-[10px] bg-teal-200 dark:bg-teal-800 text-teal-900 dark:text-teal-100 px-2 py-0.5 rounded-full font-black uppercase">Novo</span>
                 </div>
                 <span className="text-[11px] text-teal-700 dark:text-teal-300 font-medium">
-                  Controle de escalas, previsão de recebimentos &amp; conciliação bancária
+                  Escalas, plantões a receber &amp; conciliação com extrato
                 </span>
               </button>
 

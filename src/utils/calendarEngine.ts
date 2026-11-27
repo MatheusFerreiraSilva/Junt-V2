@@ -28,7 +28,8 @@ export type ObligationType =
   | 'subscription'
   | 'installment'
   | 'credit_invoice'
-  | 'medical_receivable';
+  | 'medical_receivable'
+  | 'allowance_wave';
 export type ObligationStatus = 'previsto' | 'vencido' | 'parcial' | 'pago' | 'cancelado';
 
 export interface CalendarObligation {
@@ -46,6 +47,8 @@ export interface CalendarObligation {
   payer: PaidBy;
   assignedToPartner?: 'partner1' | 'partner2' | 'couple';
   linkedExpenseId?: string;
+  essentialClass?: 'essential' | 'cancelable';
+  waveNumber?: 1 | 2;
   installmentInfo?: {
     currentNumber: number;
     totalNumber: number;
@@ -110,8 +113,8 @@ export interface CalendarMonthCalculatedResult {
 
 /**
  * Pure deterministic calculation engine for the Financial Calendar Screen.
- * Reconciled in 29B with canonical fixed bills registry, explicit competence settlement,
- * vigência, unified installment projection, and exact integer-cent partner apportioning.
+ * Supports v2.3 Essential vs Cancelable tags, Wave 1 & Wave 2 allowance releases,
+ * unified installment projections, and medical shift accrual vs cash tracking.
  */
 export function calculateCalendarEngine(
   state: AppState,
@@ -120,6 +123,11 @@ export function calculateCalendarEngine(
   options?: {
     todayDateStr?: string;
     postponedObligations?: Record<string, string>; // obligationId -> newDueDate (YYYY-MM-DD)
+    includeAllowanceWaves?: boolean;
+    cycleStartDay?: number;
+    wave2Day?: number;
+    allowanceFloor?: number;
+    wave2ComplementPerPartner?: number;
   }
 ): CalendarMonthCalculatedResult {
   const [yearStr, monthStr] = activeMonth.split('-');
@@ -146,7 +154,6 @@ export function calculateCalendarEngine(
 
   let protectedFunds = 0;
   if (hasCashReconciliation) {
-    // TODO(Etapa 2): Migrar calendarEngine para v2.3 (sem coupleAgreement)
     if (viewMode === 'couple') {
       protectedFunds =
         (state.protectionCurrentAmount || 0) +
@@ -220,6 +227,11 @@ export function calculateCalendarEngine(
       status = 'vencido';
     }
 
+    const lowerBillNotes = `${bill.title} ${bill.category} ${bill.autoPay ? 'auto' : ''}`.toLowerCase();
+    const isCancelableBill =
+      mapToCanonicalCategoryKey(bill.category) === 'lazer' ||
+      /stream|netflix|spotify|disney|hbo|max|prime|clube|assinatura|cancel/.test(lowerBillNotes);
+
     allObligations.push({
       id: `bill-${bill.id}`,
       sourceId: bill.id,
@@ -240,6 +252,7 @@ export function calculateCalendarEngine(
           ? 'couple'
           : effectivePayer,
       linkedExpenseId: paidExpense?.id ?? hist?.linkedExpenseId,
+      essentialClass: isCancelableBill ? 'cancelable' : 'essential',
       notes: bill.autoPay ? 'Débito automático' : undefined,
       isSimulatedPostponed: isPostponed,
       originalDueDate: isPostponed ? standardDueDate : undefined,
@@ -276,12 +289,15 @@ export function calculateCalendarEngine(
       status = 'vencido';
     }
 
+    const mappedSubCategory = mapToCanonicalCategoryKey(sub.category);
+    const isEssentialSub = mappedSubCategory === 'moradia' || mappedSubCategory === 'protecao';
+
     allObligations.push({
       id: `sub-${sub.id}`,
       sourceId: sub.id,
       type: 'subscription',
       title: sub.merchant,
-      category: mapToCanonicalCategoryKey(sub.category),
+      category: mappedSubCategory,
       amount: roundMoney(split.scopedCents / 100),
       originalAmount: roundMoney(subCents / 100),
       dueDate: effectiveDueDate,
@@ -290,6 +306,7 @@ export function calculateCalendarEngine(
       status,
       payer: sub.payer || 'both',
       linkedExpenseId: paidExpense?.id,
+      essentialClass: isEssentialSub ? 'essential' : 'cancelable',
       notes: sub.frequency === 'mensal' ? 'Assinatura Mensal' : undefined,
       isSimulatedPostponed: isPostponed,
       originalDueDate: isPostponed ? standardDueDate : undefined,
@@ -454,12 +471,63 @@ export function calculateCalendarEngine(
     });
   });
 
+  // E) Optional Wave 1 & Wave 2 Allowance Releases (only when requested by UI)
+  if (options?.includeAllowanceWaves) {
+    const wave1Day = clampDayToMonth(year, month, options.cycleStartDay ?? 1);
+    const wave2Day = clampDayToMonth(year, month, options.wave2Day ?? 15);
+    const wave1Date = `${activeMonth}-${String(wave1Day).padStart(2, '0')}`;
+    const wave2Date = `${activeMonth}-${String(wave2Day).padStart(2, '0')}`;
+    const floorPerPartner = roundMoney(options.allowanceFloor ?? 700);
+    const complementPerPartner = roundMoney(options.wave2ComplementPerPartner ?? 0);
+
+    if (floorPerPartner > 0) {
+      allObligations.push({
+        id: `wave1-${activeMonth}`,
+        sourceId: `wave1-${activeMonth}`,
+        type: 'allowance_wave',
+        title: 'Onda 1 · Piso da Mesada (por pessoa)',
+        category: 'lazer',
+        amount: floorPerPartner,
+        originalAmount: floorPerPartner,
+        dueDate: wave1Date,
+        dueDay: wave1Day,
+        competenceMonth: activeMonth,
+        status: wave1Date <= todayStr ? 'pago' : 'previsto',
+        payer: 'both',
+        waveNumber: 1,
+        notes: 'Liberação garantida no início do ciclo (Só Minha + Dos Dois)',
+      });
+    }
+
+    if (complementPerPartner > 0) {
+      allObligations.push({
+        id: `wave2-${activeMonth}`,
+        sourceId: `wave2-${activeMonth}`,
+        type: 'allowance_wave',
+        title: 'Onda 2 · Complemento da Mesada (por pessoa)',
+        category: 'lazer',
+        amount: complementPerPartner,
+        originalAmount: complementPerPartner,
+        dueDate: wave2Date,
+        dueDay: wave2Day,
+        competenceMonth: activeMonth,
+        status: wave2Date <= todayStr ? 'pago' : 'previsto',
+        payer: 'both',
+        waveNumber: 2,
+        notes: 'Liberação após travas e saúde financeira confirmadas',
+      });
+    }
+  }
+
   // 3. Concentration of Commitments Analysis
+  const isCommitmentObligation = (o: CalendarObligation) =>
+    o.type !== 'medical_receivable' && o.type !== 'allowance_wave';
+
   const concentrationAlerts: DayConcentrationAlert[] = [];
   const dayCommitmentBuckets: Record<number, { amountCents: number; count: number; dateStr: string }> = {};
 
   allObligations
-    .filter((o) => o.type !== 'medical_receivable')
+    .filter(isCommitmentObligation)
     .forEach((o) => {
       if (!dayCommitmentBuckets[o.dueDay]) {
         dayCommitmentBuckets[o.dueDay] = { amountCents: 0, count: 0, dateStr: o.dueDate };
@@ -469,7 +537,7 @@ export function calculateCalendarEngine(
     });
 
   const totalMonthCommitmentsCents = allObligations
-    .filter((o) => o.type !== 'medical_receivable')
+    .filter(isCommitmentObligation)
     .reduce((sum, o) => sum + toSafeCents(o.amount), 0);
   const totalMonthCommitments = roundMoney(totalMonthCommitmentsCents / 100);
 
@@ -582,7 +650,7 @@ export function calculateCalendarEngine(
     // Obligations on this date
     const dayObligations = allObligations.filter((o) => o.dueDate === dateStr);
     const dayCommitmentsCents = dayObligations
-      .filter((o) => o.type !== 'medical_receivable')
+      .filter((o) => o.type !== 'medical_receivable' && o.type !== 'allowance_wave')
       .reduce((sum, o) => sum + toSafeCents(o.amount), 0);
     const dayCommitmentsSum = roundMoney(dayCommitmentsCents / 100);
 
@@ -653,7 +721,13 @@ export function calculateCalendarEngine(
 
   const filterAgendaObligations = (endDate: string) => {
     return allObligations
-      .filter((o) => o.dueDate >= todayStr && o.dueDate <= endDate && o.type !== 'medical_receivable')
+      .filter(
+        (o) =>
+          o.dueDate >= todayStr &&
+          o.dueDate <= endDate &&
+          o.type !== 'medical_receivable' &&
+          o.type !== 'allowance_wave'
+      )
       .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
   };
 
@@ -699,13 +773,13 @@ export function calculateCalendarEngine(
 
   const commitmentsPaid = roundMoney(
     allObligations
-      .filter((o) => o.status === 'pago' && o.type !== 'medical_receivable')
+      .filter((o) => o.status === 'pago' && o.type !== 'medical_receivable' && o.type !== 'allowance_wave')
       .reduce((sum, o) => sum + toSafeCents(o.amount), 0) / 100
   );
 
   const commitmentsPending = roundMoney(
     allObligations
-      .filter((o) => o.status !== 'pago' && o.type !== 'medical_receivable')
+      .filter((o) => o.status !== 'pago' && o.type !== 'medical_receivable' && o.type !== 'allowance_wave')
       .reduce((sum, o) => sum + toSafeCents(o.amount), 0) / 100
   );
 

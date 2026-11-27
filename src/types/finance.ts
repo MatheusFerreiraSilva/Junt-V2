@@ -1424,9 +1424,38 @@ export interface CoupleAccountData {
   inviteCode: string;
   partner1Name: string;
   partner2Name: string;
+  partner1Uid?: string;
+  partner2Uid?: string;
   partner1Income: number;
   partner2Income: number;
   createdAt: string;
+}
+
+export type V23CascadeDestination =
+  | 'house_routine'
+  | 'solo_allowance'
+  | 'shared_allowance'
+  | 'internal';
+
+export interface V23WorkspacePreferences {
+  wave2Day: number;
+  defaultGroceriesBudget: number;
+  defaultRoutineBudget: number;
+  defaultBufferLimit: number;
+  favoriteHospitals: string[];
+  allowanceWaveOverrideByCycle: Record<string, 1 | 2>;
+}
+
+export interface V23DualLedgerHistoryPoint {
+  cycleId: string;
+  monthKey: string;
+  label: string;
+  newNetIncome: number;
+  actualStructureTotal: number;
+  structureCapAmount: number;
+  savingsBelowCap: number;
+  commonSurplus: number;
+  personalAllowanceSurplus: number;
 }
 
 // ==========================================

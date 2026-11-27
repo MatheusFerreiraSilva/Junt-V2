@@ -100,16 +100,58 @@ import {
   ReinforcementProvenanceRef,
   CategoryReinforcementSummary,
   HouseholdConfig,
+  HouseholdTransaction,
   MedicalShiftRecord,
   TransactionBucket,
+  BudgetCycle,
+  SharedAllowanceExpense,
+  InstallmentPlan,
+  Goal,
+  GoalContribution,
+  AllowanceWallet,
+  AllowanceExpense,
+  SurplusRouting,
+  V23CascadeDestination,
+  V23WorkspacePreferences,
+  V23DualLedgerHistoryPoint,
 } from '../types/finance';
 import {
+  addCyclesToCycleId,
+  calculateMandatoryGoalAllocation,
   resolveHouseholdConfig,
+  simulateInstallmentPurchase,
+  type InstallmentSimulationResult,
+  type WaterfallEvaluationResult,
 } from '../domain/waterfallEngine';
 import {
   confirmStagedTransactionRoute,
   type ConfirmStagedTransactionResult,
 } from '../lib/v23Persistence';
+import {
+  testFirestoreConnection,
+  subscribeHouseholdWorkspace,
+  saveHouseholdConfigRemote,
+  upsertBudgetCycleRemote,
+  persistHouseholdTransactionRemote,
+  updateHouseholdTransactionBucketRemote,
+  persistSharedAllowanceExpenseRemote,
+  persistInstallmentPlanRemote,
+  persistPrivateAllowanceExpense,
+  sendAllowanceBoostRemote,
+  sweepAllowanceToGoalsRemote,
+  closeCycleAndRouteSurplusRemote,
+} from '../lib/v23Firestore';
+import {
+  DEFAULT_V23_PREFERENCES,
+  buildDualLedgerHistory6M,
+  computeCycleInputsFromWorkspace,
+  cycleIdToMonthKey,
+  mapBucketToCategory,
+  mergeV23Goals,
+  mergeV23InstallmentPlans,
+  monthKeyToCycleId,
+  resolveActiveWaveForCycle,
+} from '../utils/v23Helpers';
 import type {
   StagedCsvTransaction,
   TriageDestination,
@@ -207,7 +249,11 @@ import {
   type BuildBudgetApplicationCommandResult,
   type RebalanceResult,
 } from '../utils/rebalanceBudgetEngine';
-import { calculateShieldMetrics } from '../domain/shieldEngine';
+import {
+  calculateShieldMetrics,
+  type RouteInvestmentsResult,
+  type ShieldMetricsResult,
+} from '../domain/shieldEngine';
 
 export const CATEGORIES_BASE: Record<CategoryKey, { name: string; emoji: string; description: string; colorHex: string; bgLight: string; borderHex: string }> = {
   moradia: {
@@ -893,6 +939,49 @@ export interface FinanceContextType {
     reconcileShiftId?: string;
   }) => Promise<ConfirmStagedTransactionResult>;
 
+  // v2.3 Protocolos B.0-B.4 + C.1 (Cascata 60/30/10, Mesada Híbrida, Escudo & Duplo Ledger)
+  activeCycleId: string;
+  activeWave: 1 | 2;
+  v23Preferences: V23WorkspacePreferences;
+  budgetCyclesMap: Record<string, BudgetCycle>;
+  activeBudgetCycle: BudgetCycle;
+  v23Transactions: HouseholdTransaction[];
+  v23SharedAllowanceExpenses: SharedAllowanceExpense[];
+  myAllowanceExpenses: AllowanceExpense[];
+  myAllowanceWallet: AllowanceWallet;
+  v23InstallmentPlans: InstallmentPlan[];
+  v23Goals: Goal[];
+  v23GoalContributions: GoalContribution[];
+  waterfallResult: WaterfallEvaluationResult;
+  shieldMetrics: ShieldMetricsResult;
+  investmentRouting: RouteInvestmentsResult;
+  bucketBreakdown: Record<TransactionBucket, number>;
+  dualLedgerHistory6M: V23DualLedgerHistoryPoint[];
+  saveHouseholdConfig: (
+    patch: Partial<HouseholdConfig>,
+    prefPatch?: Partial<V23WorkspacePreferences>
+  ) => Promise<void>;
+  updateV23Preferences: (patch: Partial<V23WorkspacePreferences>) => void;
+  simulateInstallment: (params: {
+    purchaseAmount: number;
+    installmentsCount: number;
+    scope?: 'house' | 'solo_allowance';
+  }) => InstallmentSimulationResult;
+  addCascadeTransaction: (params: {
+    destination: V23CascadeDestination;
+    title: string;
+    amount: number;
+    date: string;
+    bucket?: TransactionBucket;
+    sharedCategory?: string;
+    installmentsCount?: number;
+  }) => Promise<void>;
+  reclassifyTransactionBucket: (txId: string, newBucket: TransactionBucket) => Promise<void>;
+  sendAllowanceBoost: (amount: number) => Promise<void>;
+  sweepAllowanceToGoals: (goalId: string, amount: number) => Promise<void>;
+  toggleAllowanceWave: (targetWave?: 1 | 2) => Promise<1 | 2>;
+  closeCycleAndRouteSurplus: (routing: SurplusRouting) => Promise<void>;
+
   // Auth & Cloud Sync & Couple Fusion
   currentUser: User | null;
   userProfile: UserAuthProfile | null;
@@ -1274,6 +1363,8 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
                     inviteCode: cData.inviteCode,
                     partner1Name: cData.partner1Name,
                     partner2Name: cData.partner2Name,
+                    partner1Uid: typeof cData.partner1Uid === 'string' ? cData.partner1Uid : undefined,
+                    partner2Uid: typeof cData.partner2Uid === 'string' ? cData.partner2Uid : undefined,
                     partner1Income: cData.partner1Income !== undefined ? cData.partner1Income : 0,
                     partner2Income: cData.partner2Income !== undefined ? cData.partner2Income : 0,
                     createdAt: cData.createdAt || new Date().toISOString(),
@@ -4492,6 +4583,102 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
 
   const [v23ConfirmedHashes, setV23ConfirmedHashes] = useState<string[]>([]);
 
+  // =========================================================================
+  // WORKSPACE v2.3 (REAL-TIME FIRESTORE + LOCAL FALLBACK + ZERO-SURVEILLANCE)
+  // =========================================================================
+  interface V23LocalWorkspaceStore {
+    householdConfigPatch?: Partial<HouseholdConfig>;
+    preferences?: V23WorkspacePreferences;
+    budgetCycles?: Record<string, BudgetCycle>;
+    transactions?: HouseholdTransaction[];
+    sharedAllowanceExpenses?: SharedAllowanceExpense[];
+    installmentPlans?: InstallmentPlan[];
+    goals?: Goal[];
+    goalContributions?: GoalContribution[];
+    myAllowanceWallets?: Record<string, AllowanceWallet>;
+    myAllowanceExpenses?: AllowanceExpense[];
+  }
+
+  const v23StorageKey = useMemo(
+    () => `junto_v23_workspace_v1:${currentUser?.uid || 'local'}`,
+    [currentUser?.uid]
+  );
+
+  const [v23LocalStore, setV23LocalStore] = useState<V23LocalWorkspaceStore>(() => {
+    try {
+      const raw = localStorage.getItem(`junto_v23_workspace_v1:${auth.currentUser?.uid || 'guest-default-user'}`);
+      if (raw) return JSON.parse(raw) as V23LocalWorkspaceStore;
+    } catch {
+      // ignore storage errors
+    }
+    return {};
+  });
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(v23StorageKey);
+      if (raw) {
+        setV23LocalStore(JSON.parse(raw) as V23LocalWorkspaceStore);
+      } else {
+        setV23LocalStore({});
+      }
+    } catch {
+      setV23LocalStore({});
+    }
+  }, [v23StorageKey]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(v23StorageKey, JSON.stringify(v23LocalStore));
+    } catch {
+      // ignore storage quota errors
+    }
+  }, [v23StorageKey, v23LocalStore]);
+
+  const [v23RemoteHousehold, setV23RemoteHousehold] = useState<HouseholdConfig | null>(null);
+  const [v23RemoteCycles, setV23RemoteCycles] = useState<Record<string, BudgetCycle>>({});
+  const [v23RemoteTransactions, setV23RemoteTransactions] = useState<HouseholdTransaction[]>([]);
+  const [v23RemoteSharedAllowance, setV23RemoteSharedAllowance] = useState<SharedAllowanceExpense[]>([]);
+  const [v23RemoteInstallments, setV23RemoteInstallments] = useState<InstallmentPlan[]>([]);
+  const [v23RemoteShifts, setV23RemoteShifts] = useState<MedicalShiftRecord[]>([]);
+  const [v23RemoteGoals, setV23RemoteGoals] = useState<Goal[]>([]);
+  const [v23RemoteGoalContributions, setV23RemoteGoalContributions] = useState<GoalContribution[]>([]);
+  const [v23RemoteWallets, setV23RemoteWallets] = useState<Record<string, AllowanceWallet>>({});
+  const [v23RemoteMyExpenses, setV23RemoteMyExpenses] = useState<AllowanceExpense[]>([]);
+
+  const isV23CloudActive = Boolean(
+    currentUser && !currentUser.isAnonymous && coupleAccount?.id && !import.meta.env.VITEST
+  );
+
+  useEffect(() => {
+    if (!isV23CloudActive || !currentUser?.uid || !coupleAccount?.id) return;
+    void testFirestoreConnection(db);
+    const unsub = subscribeHouseholdWorkspace(db, coupleAccount.id, currentUser.uid, {
+      onHousehold: setV23RemoteHousehold,
+      onBudgetCycles: setV23RemoteCycles,
+      onTransactions: setV23RemoteTransactions,
+      onSharedAllowanceExpenses: setV23RemoteSharedAllowance,
+      onInstallmentPlans: setV23RemoteInstallments,
+      onMedicalShifts: setV23RemoteShifts,
+      onGoals: setV23RemoteGoals,
+      onGoalContributions: setV23RemoteGoalContributions,
+      onMyAllowanceWallets: setV23RemoteWallets,
+      onMyAllowanceExpenses: setV23RemoteMyExpenses,
+    });
+    return () => unsub();
+  }, [isV23CloudActive, currentUser?.uid, coupleAccount?.id]);
+
+  const v23Preferences = useMemo<V23WorkspacePreferences>(
+    () => ({
+      ...DEFAULT_V23_PREFERENCES,
+      ...(v23LocalStore.preferences || {}),
+      allowanceWaveOverrideByCycle: {
+        ...(v23LocalStore.preferences?.allowanceWaveOverrideByCycle || {}),
+      },
+    }),
+    [v23LocalStore.preferences]
+  );
+
   const householdConfig = useMemo<HouseholdConfig>(() => {
     const p1TaxRate = (state.profile.partner1Fiscal?.cnpjTaxRate ?? 0) / 100;
     const p2TaxRate = (state.profile.partner2Fiscal?.cnpjTaxRate ?? 0) / 100;
@@ -4505,14 +4692,54 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
       .map(v => (v || '').trim())
       .filter(v => v.length >= 4 && v !== 'Aguardando Par...');
 
+    const memberUids = Array.from(
+      new Set(
+        [
+          coupleAccount?.partner1Uid,
+          coupleAccount?.partner2Uid,
+          currentUser?.uid || 'local-user',
+        ].filter((v): v is string => Boolean(v && v.trim()))
+      )
+    ).slice(0, 2);
+
+    const localPatch: Partial<HouseholdConfig> = v23LocalStore.householdConfigPatch || {};
+    const remotePatch: Partial<HouseholdConfig> = (v23RemoteHousehold as Partial<HouseholdConfig> | null) || {};
+
     return resolveHouseholdConfig({
-      id: coupleAccount?.id,
-      memberUids: [currentUser?.uid || 'local-user'],
-      memberTaxIds,
-      defaultShiftTaxRate: inferredShiftTaxRate,
+      id: coupleAccount?.id || localPatch.id || 'local-household',
+      memberUids:
+        remotePatch.memberUids && remotePatch.memberUids.length > 0
+          ? remotePatch.memberUids
+          : memberUids,
+      memberTaxIds:
+        remotePatch.memberTaxIds && remotePatch.memberTaxIds.length > 0
+          ? remotePatch.memberTaxIds
+          : localPatch.memberTaxIds && localPatch.memberTaxIds.length > 0
+          ? localPatch.memberTaxIds
+          : memberTaxIds,
+      cycleStartDay: remotePatch.cycleStartDay ?? localPatch.cycleStartDay,
+      mandatoryGoalRate: remotePatch.mandatoryGoalRate ?? localPatch.mandatoryGoalRate,
+      housingCapRate: remotePatch.housingCapRate ?? localPatch.housingCapRate,
+      structureCapRate: remotePatch.structureCapRate ?? localPatch.structureCapRate,
+      installmentCapMin: remotePatch.installmentCapMin ?? localPatch.installmentCapMin,
+      installmentCapMax: remotePatch.installmentCapMax ?? localPatch.installmentCapMax,
+      installmentCapTarget: remotePatch.installmentCapTarget ?? localPatch.installmentCapTarget,
+      allowanceFloor: remotePatch.allowanceFloor ?? localPatch.allowanceFloor,
+      allowanceCap: remotePatch.allowanceCap ?? localPatch.allowanceCap,
+      shieldFloorMonths:
+        remotePatch.shieldFloorMonths ??
+        localPatch.shieldFloorMonths ??
+        (state.profile.emergencyReserveMonthsTarget || 4),
+      shieldTargetMonths: remotePatch.shieldTargetMonths ?? localPatch.shieldTargetMonths,
+      defaultShiftTaxRate:
+        remotePatch.defaultShiftTaxRate ?? localPatch.defaultShiftTaxRate ?? inferredShiftTaxRate,
+      goalAllocationRules:
+        remotePatch.goalAllocationRules ?? localPatch.goalAllocationRules ?? [],
     });
   }, [
     coupleAccount?.id,
+    coupleAccount?.partner1Uid,
+    coupleAccount?.partner2Uid,
     currentUser?.uid,
     state.profile.partner1Fiscal?.cnpjTaxRate,
     state.profile.partner1Fiscal?.cpfTaxNumber,
@@ -4520,17 +4747,245 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
     state.profile.partner2Fiscal?.cpfTaxNumber,
     state.profile.partner1Name,
     state.profile.partner2Name,
+    state.profile.emergencyReserveMonthsTarget,
+    v23LocalStore.householdConfigPatch,
+    v23RemoteHousehold,
   ]);
 
   const v23MedicalShifts = useMemo<MedicalShiftRecord[]>(() => {
+    if (isV23CloudActive && v23RemoteShifts.length > 0) return v23RemoteShifts;
     const uid = currentUser?.uid || 'local-user';
     return (state.medicalShifts || []).map(s =>
       mapLegacyShiftToRecord(s, uid, householdConfig.defaultShiftTaxRate)
     );
-  }, [state.medicalShifts, currentUser?.uid, householdConfig.defaultShiftTaxRate]);
+  }, [isV23CloudActive, v23RemoteShifts, state.medicalShifts, currentUser?.uid, householdConfig.defaultShiftTaxRate]);
+
+  const v23Transactions = useMemo<HouseholdTransaction[]>(() => {
+    const byId = new Map<string, HouseholdTransaction>();
+    for (const tx of v23LocalStore.transactions || []) {
+      if (tx.id) byId.set(tx.id, tx);
+    }
+    if (isV23CloudActive) {
+      for (const tx of v23RemoteTransactions) {
+        if (tx.id) byId.set(tx.id, tx);
+      }
+    }
+    return Array.from(byId.values()).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  }, [isV23CloudActive, v23RemoteTransactions, v23LocalStore.transactions]);
+
+  const v23SharedAllowanceExpenses = useMemo<SharedAllowanceExpense[]>(() => {
+    const byId = new Map<string, SharedAllowanceExpense>();
+    for (const item of v23LocalStore.sharedAllowanceExpenses || []) {
+      if (item.id) byId.set(item.id, item);
+    }
+    if (isV23CloudActive) {
+      for (const item of v23RemoteSharedAllowance) {
+        if (item.id) byId.set(item.id, item);
+      }
+    }
+    return Array.from(byId.values()).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  }, [isV23CloudActive, v23RemoteSharedAllowance, v23LocalStore.sharedAllowanceExpenses]);
+
+  const myAllowanceExpenses = useMemo<AllowanceExpense[]>(() => {
+    const byId = new Map<string, AllowanceExpense>();
+    for (const item of v23LocalStore.myAllowanceExpenses || []) {
+      if (item.id) byId.set(item.id, item);
+    }
+    if (isV23CloudActive) {
+      for (const item of v23RemoteMyExpenses) {
+        if (item.id) byId.set(item.id, item);
+      }
+    }
+    return Array.from(byId.values()).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  }, [isV23CloudActive, v23RemoteMyExpenses, v23LocalStore.myAllowanceExpenses]);
+
+  const myAllowanceWallets = useMemo<Record<string, AllowanceWallet>>(
+    () => ({
+      ...(v23LocalStore.myAllowanceWallets || {}),
+      ...(isV23CloudActive ? v23RemoteWallets : {}),
+    }),
+    [isV23CloudActive, v23RemoteWallets, v23LocalStore.myAllowanceWallets]
+  );
+
+  const budgetCyclesMap = useMemo<Record<string, BudgetCycle>>(
+    () => ({
+      ...(v23LocalStore.budgetCycles || {}),
+      ...(isV23CloudActive ? v23RemoteCycles : {}),
+    }),
+    [isV23CloudActive, v23RemoteCycles, v23LocalStore.budgetCycles]
+  );
+
+  const v23InstallmentPlans = useMemo<InstallmentPlan[]>(() => {
+    const combinedRemote = [
+      ...(v23LocalStore.installmentPlans || []),
+      ...(isV23CloudActive ? v23RemoteInstallments : []),
+    ];
+    return mergeV23InstallmentPlans(combinedRemote, state.installments || []);
+  }, [isV23CloudActive, v23RemoteInstallments, v23LocalStore.installmentPlans, state.installments]);
+
+  const v23Goals = useMemo<Goal[]>(() => {
+    const combinedRemote = [
+      ...(v23LocalStore.goals || []),
+      ...(isV23CloudActive ? v23RemoteGoals : []),
+    ];
+    return mergeV23Goals(
+      combinedRemote,
+      state.piggyBanks || [],
+      state.protectionCurrentAmount || 0,
+      autoCalculatedProtectionTarget || 20000
+    );
+  }, [
+    isV23CloudActive,
+    v23RemoteGoals,
+    v23LocalStore.goals,
+    state.piggyBanks,
+    state.protectionCurrentAmount,
+    autoCalculatedProtectionTarget,
+  ]);
+
+  const v23GoalContributions = useMemo<GoalContribution[]>(() => {
+    const byId = new Map<string, GoalContribution>();
+    for (const c of v23LocalStore.goalContributions || []) {
+      if (c.id) byId.set(c.id, c);
+    }
+    if (isV23CloudActive) {
+      for (const c of v23RemoteGoalContributions) {
+        if (c.id) byId.set(c.id, c);
+      }
+    }
+    return Array.from(byId.values()).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  }, [isV23CloudActive, v23RemoteGoalContributions, v23LocalStore.goalContributions]);
+
+  const activeCycleId = useMemo(
+    () => monthKeyToCycleId(state.currentMonth),
+    [state.currentMonth]
+  );
+
+  const activeWave = useMemo<1 | 2>(
+    () =>
+      resolveActiveWaveForCycle({
+        cycleId: activeCycleId,
+        currentMonthKey: state.currentMonth,
+        wave2Day: v23Preferences.wave2Day,
+        overrideByCycle: v23Preferences.allowanceWaveOverrideByCycle,
+      }),
+    [activeCycleId, state.currentMonth, v23Preferences]
+  );
+
+  const declaredMonthlyIncomeFallback = useMemo(
+    () =>
+      Math.max(
+        0,
+        (state.profile.partner1Income || 0) + (state.profile.partner2Income || 0)
+      ),
+    [state.profile.partner1Income, state.profile.partner2Income]
+  );
+
+  const partnerUidForLedger = useMemo(() => {
+    const myUid = currentUser?.uid || 'local-user';
+    const other = householdConfig.memberUids.find((id) => id !== myUid);
+    return other || 'partner-b';
+  }, [currentUser?.uid, householdConfig.memberUids]);
+
+  const dualLedgerHistory6M = useMemo(
+    () =>
+      buildDualLedgerHistory6M({
+        activeCycleId,
+        householdConfig,
+        preferences: v23Preferences,
+        budgetCyclesMap,
+        transactions: v23Transactions,
+        legacyExpenses: state.expenses || [],
+        fixedBills: state.coupleFixedBills || state.fixedBillAlerts || [],
+        installmentPlans: v23InstallmentPlans,
+        incomes: state.incomes || [],
+        declaredMonthlyIncomeFallback,
+        shifts: v23MedicalShifts,
+        sharedAllowanceExpenses: v23SharedAllowanceExpenses,
+        myAllowanceExpenses,
+        myAllowanceWallets,
+        goals: v23Goals,
+        uid: currentUser?.uid || 'local-user',
+        partnerUid: partnerUidForLedger,
+      }),
+    [
+      activeCycleId,
+      householdConfig,
+      v23Preferences,
+      budgetCyclesMap,
+      v23Transactions,
+      state.expenses,
+      state.coupleFixedBills,
+      state.fixedBillAlerts,
+      v23InstallmentPlans,
+      state.incomes,
+      declaredMonthlyIncomeFallback,
+      v23MedicalShifts,
+      v23SharedAllowanceExpenses,
+      myAllowanceExpenses,
+      myAllowanceWallets,
+      v23Goals,
+      currentUser?.uid,
+      partnerUidForLedger,
+    ]
+  );
+
+  const activeWorkspaceEval = useMemo(() => {
+    const historicalCycles = dualLedgerHistory6M
+      .filter((pt) => pt.cycleId < activeCycleId)
+      .map((pt) => ({
+        cycleId: pt.cycleId,
+        newNetIncome: pt.newNetIncome,
+        cycle: budgetCyclesMap[pt.cycleId],
+      }));
+
+    return computeCycleInputsFromWorkspace({
+      cycleId: activeCycleId,
+      householdConfig,
+      preferences: v23Preferences,
+      storedCycle: budgetCyclesMap[activeCycleId],
+      transactions: v23Transactions,
+      legacyExpenses: state.expenses || [],
+      fixedBills: state.coupleFixedBills || state.fixedBillAlerts || [],
+      installmentPlans: v23InstallmentPlans,
+      incomes: state.incomes || [],
+      declaredMonthlyIncomeFallback,
+      shifts: v23MedicalShifts,
+      sharedAllowanceExpenses: v23SharedAllowanceExpenses,
+      myAllowanceExpenses,
+      myAllowanceWallet: myAllowanceWallets[activeCycleId],
+      goals: v23Goals,
+      uid: currentUser?.uid || 'local-user',
+      partnerUid: partnerUidForLedger,
+      historicalCycles,
+    });
+  }, [
+    dualLedgerHistory6M,
+    activeCycleId,
+    householdConfig,
+    v23Preferences,
+    budgetCyclesMap,
+    v23Transactions,
+    state.expenses,
+    state.coupleFixedBills,
+    state.fixedBillAlerts,
+    v23InstallmentPlans,
+    state.incomes,
+    declaredMonthlyIncomeFallback,
+    v23MedicalShifts,
+    v23SharedAllowanceExpenses,
+    myAllowanceExpenses,
+    myAllowanceWallets,
+    v23Goals,
+    currentUser?.uid,
+    partnerUidForLedger,
+  ]);
 
   const v23ExistingHashes = useMemo<string[]>(() => {
     const hashes = new Set<string>(v23ConfirmedHashes);
+    for (const tx of v23Transactions) {
+      if (tx.importHash) hashes.add(tx.importHash);
+    }
     for (const exp of state.expenses) {
       if (exp.operationId?.startsWith('csv-hash:')) {
         hashes.add(exp.operationId.slice('csv-hash:'.length));
@@ -4542,7 +4997,7 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
       }
     }
     return Array.from(hashes);
-  }, [v23ConfirmedHashes, state.expenses, state.installments]);
+  }, [v23ConfirmedHashes, v23Transactions, state.expenses, state.installments]);
 
   const confirmCsvTriage = async (params: {
     staged: StagedCsvTransaction;
@@ -4599,10 +5054,44 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
       prev.includes(params.staged.importHash) ? prev : [...prev, params.staged.importHash]
     );
 
-    if (params.destination === 'house_routine') {
+    if (params.destination === 'solo_allowance' && result.allowanceExpense) {
+      const expenseId = `priv_${params.staged.importHash.slice(0, 24)}`;
+      setV23LocalStore((prev) => ({
+        ...prev,
+        myAllowanceExpenses: [
+          { id: expenseId, ...result.allowanceExpense! },
+          ...(prev.myAllowanceExpenses || []).filter((e) => e.importHash !== params.staged.importHash),
+        ],
+        myAllowanceWallets: result.updatedWallet
+          ? {
+              ...(prev.myAllowanceWallets || {}),
+              [params.staged.cycleId]: result.updatedWallet,
+            }
+          : prev.myAllowanceWallets,
+      }));
+    } else if (params.destination === 'house_routine') {
       const chosenBucket = params.bucket || params.staged.suggestedBucket || 'routine';
       const mappedCat = bucketToCategory[chosenBucket] || 'lazer';
       const txId = `csv-tx-${params.staged.importHash.slice(0, 16)}`;
+      if (result.householdTransaction || result.installmentPlan) {
+        setV23LocalStore((prev) => ({
+          ...prev,
+          transactions: result.householdTransaction
+            ? [
+                { id: txId, ...result.householdTransaction },
+                ...(prev.transactions || []).filter((t) => t.importHash !== params.staged.importHash),
+              ]
+            : prev.transactions,
+          installmentPlans: result.installmentPlan
+            ? [
+                { id: `plan_${params.staged.importHash.slice(0, 16)}`, ...result.installmentPlan },
+                ...(prev.installmentPlans || []).filter(
+                  (p) => p.importHash !== params.staged.importHash
+                ),
+              ]
+            : prev.installmentPlans,
+        }));
+      }
       setState(prev => {
         const nextExpenses = prev.expenses.some(e => e.id === txId)
           ? prev.expenses
@@ -4653,6 +5142,17 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
       });
     } else if (params.destination === 'shared_allowance') {
       const txId = `csv-shared-${params.staged.importHash.slice(0, 16)}`;
+      if (result.sharedAllowanceExpense) {
+        setV23LocalStore((prev) => ({
+          ...prev,
+          sharedAllowanceExpenses: [
+            { id: txId, ...result.sharedAllowanceExpense! },
+            ...(prev.sharedAllowanceExpenses || []).filter(
+              (s) => s.importHash !== params.staged.importHash
+            ),
+          ],
+        }));
+      }
       setState(prev => {
         if (prev.expenses.some(e => e.id === txId)) return prev;
         return {
@@ -4681,6 +5181,642 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
 
     return result;
   };
+
+  // =========================================================================
+  // AÇÕES SOBERANAS v2.3 (Protocolos B.0-B.4 + C.1)
+  // =========================================================================
+  const updateV23Preferences = useCallback((patch: Partial<V23WorkspacePreferences>) => {
+    setV23LocalStore((prev) => ({
+      ...prev,
+      preferences: {
+        ...DEFAULT_V23_PREFERENCES,
+        ...(prev.preferences || {}),
+        ...patch,
+        allowanceWaveOverrideByCycle: {
+          ...(prev.preferences?.allowanceWaveOverrideByCycle || {}),
+          ...(patch.allowanceWaveOverrideByCycle || {}),
+        },
+      },
+    }));
+  }, []);
+
+  const saveHouseholdConfig = useCallback(
+    async (
+      patch: Partial<HouseholdConfig>,
+      prefPatch?: Partial<V23WorkspacePreferences>
+    ): Promise<void> => {
+      const nextConfig = resolveHouseholdConfig({
+        ...householdConfig,
+        ...patch,
+      });
+
+      setV23LocalStore((prev) => ({
+        ...prev,
+        householdConfigPatch: {
+          ...(prev.householdConfigPatch || {}),
+          ...patch,
+        },
+        preferences: prefPatch
+          ? {
+              ...DEFAULT_V23_PREFERENCES,
+              ...(prev.preferences || {}),
+              ...prefPatch,
+            }
+          : prev.preferences,
+      }));
+
+      if (isV23CloudActive && coupleAccount?.id) {
+        await saveHouseholdConfigRemote(db, coupleAccount.id, nextConfig);
+      }
+    },
+    [householdConfig, isV23CloudActive, coupleAccount?.id]
+  );
+
+  const simulateInstallment = useCallback(
+    (params: {
+      purchaseAmount: number;
+      installmentsCount: number;
+      scope?: 'house' | 'solo_allowance';
+    }): InstallmentSimulationResult => {
+      const count = Math.max(1, Math.trunc(params.installmentsCount || 1));
+      const monthly = roundMoney(Math.max(0, params.purchaseAmount) / count);
+      if (params.scope === 'solo_allowance') {
+        const floorHalf = roundMoney(householdConfig.allowanceFloor * 0.5);
+        const ratio =
+          householdConfig.allowanceFloor > 0
+            ? monthly / householdConfig.allowanceFloor
+            : monthly > 0
+            ? Infinity
+            : 0;
+        const blocked = monthly > floorHalf + 0.005;
+        return {
+          monthlyInstallment: monthly,
+          currentInstallmentRatio: 0,
+          projectedInstallmentsTotal: monthly,
+          projectedInstallmentRatio: ratio,
+          targetRate: 0.35,
+          maxRate: 0.5,
+          allowanceReductionPerPartner: monthly,
+          payoffCycleId: addCyclesToCycleId(activeCycleId, count - 1),
+          verdict: blocked ? 'blocked' : ratio > 0.35 ? 'caution' : 'approved',
+          reason: blocked
+            ? `Parcela pessoal (R$ ${monthly.toFixed(2)}) excede 50% do piso da mesada (R$ ${floorHalf.toFixed(2)}).`
+            : `Parcela cabe dentro do limite de 50% do piso da sua mesada (até R$ ${floorHalf.toFixed(2)}/mês).`,
+        };
+      }
+
+      return simulateInstallmentPurchase({
+        purchaseAmount: params.purchaseAmount,
+        installmentsCount: count,
+        currentInstallmentsTotal: activeWorkspaceEval.waterfall.guards.installments.total,
+        referenceIncome3M: activeWorkspaceEval.waterfall.liquidity.referenceIncome3M,
+        startCycleId: activeCycleId,
+        householdConfig,
+        currentNewNetIncome: activeWorkspaceEval.waterfall.liquidity.newNetIncome,
+        currentActualStructureTotal:
+          activeWorkspaceEval.waterfall.guards.structure.actualStructureTotal,
+        currentMandatoryGoalAmount:
+          activeWorkspaceEval.waterfall.mandatoryGoal.mandatoryGoalAmount,
+      });
+    },
+    [
+      householdConfig,
+      activeCycleId,
+      activeWorkspaceEval.waterfall,
+    ]
+  );
+
+  const addCascadeTransaction = useCallback(
+    async (params: {
+      destination: V23CascadeDestination;
+      title: string;
+      amount: number;
+      date: string;
+      bucket?: TransactionBucket;
+      sharedCategory?: string;
+      installmentsCount?: number;
+    }): Promise<void> => {
+      const uid = currentUser?.uid || 'local-user';
+      const safeTitle = params.title.trim().slice(0, 200) || 'Lançamento';
+      const amount = roundMoney(Math.abs(params.amount));
+      if (amount <= 0) throw new Error('Informe um valor maior que zero.');
+
+      const cycleId = monthKeyToCycleId((params.date || state.currentMonth).slice(0, 7));
+      const importHash = `v23-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const installmentsCount = Math.max(1, Math.trunc(params.installmentsCount || 1));
+
+      // DESTINO 4: INTERNO (zero impacto na cascata)
+      if (params.destination === 'internal') {
+        return;
+      }
+
+      // DESTINO 2: MESADA — SÓ MINHA (ISOLAMENTO ESTRITO EM /users/{uid}/)
+      if (params.destination === 'solo_allowance') {
+        const monthlyAmount =
+          installmentsCount > 1 ? roundMoney(amount / installmentsCount) : amount;
+        const maxPersonalInstallment = roundMoney(householdConfig.allowanceFloor * 0.5);
+        if (installmentsCount > 1 && monthlyAmount > maxPersonalInstallment + 0.005) {
+          throw new Error(
+            `Parcela pessoal (R$ ${monthlyAmount.toFixed(2)}) excede 50% do piso da mesada (R$ ${maxPersonalInstallment.toFixed(2)}).`
+          );
+        }
+
+        const installmentInfo =
+          installmentsCount > 1
+            ? {
+                currentInstallment: 1,
+                totalInstallments: installmentsCount,
+                installmentAmount: monthlyAmount,
+                planId: `solo-plan-${importHash}`,
+              }
+            : null;
+
+        const expensePayload: Omit<AllowanceExpense, 'id'> = {
+          title: safeTitle,
+          amount: monthlyAmount,
+          installmentInfo,
+          date: params.date,
+          cycleId,
+          importHash,
+        };
+
+        let createdId = `priv_${importHash}`;
+        if (isV23CloudActive && currentUser?.uid) {
+          const persisted = await persistPrivateAllowanceExpense(
+            db,
+            currentUser.uid,
+            expensePayload,
+            householdConfig.allowanceFloor
+          );
+          createdId = persisted.expenseId;
+        }
+
+        setV23LocalStore((prev) => {
+          const prevWallet = prev.myAllowanceWallets?.[cycleId] ||
+            activeWorkspaceEval.waterfall.closingLedgers.walletA.walletRecord;
+          const nextSoloSpent = roundMoney((prevWallet.soloSpent || 0) + monthlyAmount);
+          const nextWallet: AllowanceWallet = {
+            ...prevWallet,
+            soloSpent: nextSoloSpent,
+            closingBalance: roundMoney(
+              (prevWallet.rolloverFromPrevious || 0) +
+                (prevWallet.monthlyAllocation || 0) +
+                (prevWallet.boostsNet || 0) -
+                nextSoloSpent -
+                (prevWallet.jointAllowanceShareSpent || 0) -
+                (prevWallet.sweptToSharedGoals || 0)
+            ),
+          };
+          return {
+            ...prev,
+            myAllowanceExpenses: [
+              { id: createdId, ...expensePayload },
+              ...(prev.myAllowanceExpenses || []),
+            ],
+            myAllowanceWallets: {
+              ...(prev.myAllowanceWallets || {}),
+              [cycleId]: nextWallet,
+            },
+          };
+        });
+        triggerCelebration();
+        return;
+      }
+
+      // DESTINO 3: MESADA — DOS DOIS (50/50)
+      if (params.destination === 'shared_allowance') {
+        const sharedPayload: Omit<SharedAllowanceExpense, 'id'> = {
+          title: safeTitle,
+          category: (params.sharedCategory || 'dos_dois').slice(0, 80),
+          totalAmount: amount,
+          splitPerPartner: roundMoney(amount / 2),
+          paidByUid: uid,
+          date: params.date,
+          cycleId,
+          importHash,
+        };
+
+        let createdId = `shared_${importHash}`;
+        if (isV23CloudActive && coupleAccount?.id) {
+          createdId = await persistSharedAllowanceExpenseRemote(
+            db,
+            coupleAccount.id,
+            sharedPayload
+          );
+        }
+
+        setV23LocalStore((prev) => ({
+          ...prev,
+          sharedAllowanceExpenses: [
+            { id: createdId, ...sharedPayload },
+            ...(prev.sharedAllowanceExpenses || []),
+          ],
+        }));
+        triggerCelebration();
+        return;
+      }
+
+      // DESTINO 1: CASA & ROTINA
+      const bucket = params.bucket || 'routine';
+      if (installmentsCount > 1) {
+        const monthlyInstallment = roundMoney(amount / installmentsCount);
+        const sim = simulateInstallment({
+          purchaseAmount: amount,
+          installmentsCount,
+          scope: 'house',
+        });
+        if (sim.verdict === 'blocked') {
+          throw new Error(sim.reason);
+        }
+        const planPayload: Omit<InstallmentPlan, 'id'> = {
+          title: safeTitle,
+          installmentAmount: monthlyInstallment,
+          currentInstallment: 1,
+          totalInstallments: installmentsCount,
+          startCycleId: cycleId,
+          endCycleId: addCyclesToCycleId(cycleId, installmentsCount - 1),
+          importHash,
+        };
+        let createdPlanId = `plan_${importHash}`;
+        if (isV23CloudActive && coupleAccount?.id) {
+          createdPlanId = await persistInstallmentPlanRemote(
+            db,
+            coupleAccount.id,
+            planPayload
+          );
+        }
+        setV23LocalStore((prev) => ({
+          ...prev,
+          installmentPlans: [
+            { id: createdPlanId, ...planPayload },
+            ...(prev.installmentPlans || []),
+          ],
+        }));
+        triggerCelebration();
+        return;
+      }
+
+      const txPayload: Omit<HouseholdTransaction, 'id'> = {
+        title: safeTitle,
+        bucket,
+        amount,
+        date: params.date,
+        paidByUid: uid,
+        cycleId,
+        importHash,
+      };
+
+      let createdTxId = `tx_${importHash}`;
+      if (isV23CloudActive && coupleAccount?.id) {
+        createdTxId = await persistHouseholdTransactionRemote(db, coupleAccount.id, txPayload);
+      }
+
+      setV23LocalStore((prev) => ({
+        ...prev,
+        transactions: [{ id: createdTxId, ...txPayload }, ...(prev.transactions || [])],
+      }));
+      triggerCelebration();
+    },
+    [
+      currentUser?.uid,
+      state.currentMonth,
+      householdConfig.allowanceFloor,
+      isV23CloudActive,
+      coupleAccount?.id,
+      activeWorkspaceEval.waterfall.closingLedgers.walletA.walletRecord,
+      simulateInstallment,
+    ]
+  );
+
+  const reclassifyTransactionBucket = useCallback(
+    async (txId: string, newBucket: TransactionBucket): Promise<void> => {
+      const existsInV23 = v23Transactions.some((tx) => tx.id === txId);
+      if (existsInV23) {
+        setV23LocalStore((prev) => ({
+          ...prev,
+          transactions: (prev.transactions || []).map((tx) =>
+            tx.id === txId ? { ...tx, bucket: newBucket } : tx
+          ),
+        }));
+        if (isV23CloudActive && coupleAccount?.id) {
+          await updateHouseholdTransactionBucketRemote(db, coupleAccount.id, txId, newBucket);
+        }
+        return;
+      }
+
+      // Fallback for legacy ExpenseItem rows shown in TransactionHistoryScreen
+      const mappedCategory = mapBucketToCategory(newBucket);
+      const mappedNature =
+        newBucket === 'fixed_essential' || newBucket === 'fixed_cancelable' ? 'fixa' : 'variavel';
+      const mappedPriority = newBucket === 'fixed_cancelable' ? 'dispensavel' : 'essencial';
+      setState((prev) => ({
+        ...prev,
+        expenses: prev.expenses.map((exp) =>
+          exp.id === txId
+            ? {
+                ...exp,
+                category: mappedCategory,
+                nature: mappedNature,
+                priority: mappedPriority,
+              }
+            : exp
+        ),
+      }));
+    },
+    [v23Transactions, isV23CloudActive, coupleAccount?.id]
+  );
+
+  const sendAllowanceBoost = useCallback(
+    async (amount: number): Promise<void> => {
+      const amt = roundMoney(Math.abs(amount));
+      if (amt <= 0) throw new Error('Informe um valor positivo para o Turbo.');
+      const myUid = currentUser?.uid || 'local-user';
+      const transfer = {
+        fromUid: myUid,
+        toUid: partnerUidForLedger,
+        amount: amt,
+        createdAt: new Date().toISOString(),
+      };
+      const baseCycle = budgetCyclesMap[activeCycleId] || activeWorkspaceEval.cycleRecord;
+      const nextCycle: BudgetCycle = {
+        ...baseCycle,
+        boostTransfers: [...(baseCycle.boostTransfers || []), transfer],
+      };
+
+      setV23LocalStore((prev) => ({
+        ...prev,
+        budgetCycles: {
+          ...(prev.budgetCycles || {}),
+          [activeCycleId]: nextCycle,
+        },
+      }));
+
+      if (isV23CloudActive && coupleAccount?.id) {
+        await sendAllowanceBoostRemote(db, {
+          householdId: coupleAccount.id,
+          cycleId: activeCycleId,
+          currentCycle: baseCycle,
+          transfer,
+        });
+      }
+      triggerCelebration();
+    },
+    [
+      currentUser?.uid,
+      partnerUidForLedger,
+      budgetCyclesMap,
+      activeCycleId,
+      activeWorkspaceEval.cycleRecord,
+      isV23CloudActive,
+      coupleAccount?.id,
+    ]
+  );
+
+  const sweepAllowanceToGoals = useCallback(
+    async (goalId: string, amount: number): Promise<void> => {
+      const amt = roundMoney(Math.abs(amount));
+      if (amt <= 0) throw new Error('Informe um valor maior que zero para ajudar nas metas.');
+      const targetGoal = v23Goals.find((g) => g.id === goalId);
+      if (!targetGoal) throw new Error('Meta selecionada não encontrada.');
+
+      const uid = currentUser?.uid || 'local-user';
+      const todayIso = new Date().toISOString().slice(0, 10);
+      const currentWallet = activeWorkspaceEval.waterfall.closingLedgers.walletA.walletRecord;
+      if (amt > Math.max(0, currentWallet.closingBalance) + 0.01) {
+        throw new Error('Valor excede o saldo disponível na sua carteira de mesada.');
+      }
+
+      let contribId = `sweep_${Date.now()}`;
+      if (isV23CloudActive && coupleAccount?.id && currentUser?.uid) {
+        contribId = await sweepAllowanceToGoalsRemote(db, {
+          householdId: coupleAccount.id,
+          uid: currentUser.uid,
+          cycleId: activeCycleId,
+          goal: targetGoal,
+          amount: amt,
+          date: todayIso,
+          currentWallet,
+        });
+      }
+
+      setV23LocalStore((prev) => {
+        const nextWallet: AllowanceWallet = {
+          ...currentWallet,
+          sweptToSharedGoals: roundMoney((currentWallet.sweptToSharedGoals || 0) + amt),
+          closingBalance: roundMoney(currentWallet.closingBalance - amt),
+        };
+        const existingGoals = prev.goals && prev.goals.length > 0 ? prev.goals : v23Goals;
+        const nextGoals = existingGoals.map((g) =>
+          g.id === goalId
+            ? { ...g, currentAmount: roundMoney((g.currentAmount || 0) + amt) }
+            : g
+        );
+        return {
+          ...prev,
+          goals: nextGoals,
+          goalContributions: [
+            {
+              id: contribId,
+              goalId,
+              amount: amt,
+              source: 'partner_allowance_sweep',
+              contributorUid: uid,
+              date: todayIso,
+              cycleId: activeCycleId,
+            },
+            ...(prev.goalContributions || []),
+          ],
+          myAllowanceWallets: {
+            ...(prev.myAllowanceWallets || {}),
+            [activeCycleId]: nextWallet,
+          },
+        };
+      });
+
+      // Keep legacy piggyBanks / protectionCurrentAmount in sync when targeting mirrored goals
+      if (goalId === 'goal_escudo_principal') {
+        setState((prev) => ({
+          ...prev,
+          protectionCurrentAmount: roundMoney((prev.protectionCurrentAmount || 0) + amt),
+        }));
+      } else {
+        setState((prev) => ({
+          ...prev,
+          piggyBanks: prev.piggyBanks.map((pb) =>
+            pb.id === goalId
+              ? { ...pb, currentAmount: roundMoney((pb.currentAmount || 0) + amt) }
+              : pb
+          ),
+        }));
+      }
+      triggerCelebration();
+    },
+    [
+      v23Goals,
+      currentUser?.uid,
+      activeWorkspaceEval.waterfall.closingLedgers.walletA.walletRecord,
+      isV23CloudActive,
+      coupleAccount?.id,
+      activeCycleId,
+    ]
+  );
+
+  const toggleAllowanceWave = useCallback(
+    async (targetWave?: 1 | 2): Promise<1 | 2> => {
+      const nextWave: 1 | 2 = targetWave ?? (activeWave === 1 ? 2 : 1);
+      updateV23Preferences({
+        allowanceWaveOverrideByCycle: {
+          [activeCycleId]: nextWave,
+        },
+      });
+
+      const unlockedPerPartner =
+        nextWave === 1
+          ? activeWorkspaceEval.waterfall.allowance.allowanceFloor
+          : activeWorkspaceEval.waterfall.allowance.fullMonthlyAllocationPerPartner;
+
+      const updatedCycle: BudgetCycle = {
+        ...activeWorkspaceEval.cycleRecord,
+        unlockedAllowanceA: unlockedPerPartner,
+        unlockedAllowanceB: unlockedPerPartner,
+      };
+
+      setV23LocalStore((prev) => ({
+        ...prev,
+        budgetCycles: {
+          ...(prev.budgetCycles || {}),
+          [activeCycleId]: updatedCycle,
+        },
+      }));
+
+      if (isV23CloudActive && coupleAccount?.id) {
+        await upsertBudgetCycleRemote(db, coupleAccount.id, activeCycleId, updatedCycle);
+      }
+
+      if (nextWave === 2) triggerCelebration();
+      return nextWave;
+    },
+    [
+      activeWave,
+      updateV23Preferences,
+      activeCycleId,
+      activeWorkspaceEval.waterfall.allowance.allowanceFloor,
+      activeWorkspaceEval.waterfall.allowance.fullMonthlyAllocationPerPartner,
+      activeWorkspaceEval.cycleRecord,
+      isV23CloudActive,
+      coupleAccount?.id,
+    ]
+  );
+
+  const closeCycleAndRouteSurplus = useCallback(
+    async (routing: SurplusRouting): Promise<void> => {
+      const nextCycleId = addCyclesToCycleId(activeCycleId, 1);
+      const closingSurplus = activeWorkspaceEval.waterfall.closingLedgers.closingSurplus;
+      const carryAmount = routing === 'carry_over' ? Math.max(0, closingSurplus) : 0;
+
+      const currentCycle: BudgetCycle = {
+        ...activeWorkspaceEval.cycleRecord,
+        surplusRouting: routing,
+      };
+
+      const prevNextCycle = budgetCyclesMap[nextCycleId];
+      const nextCycleBase: BudgetCycle = {
+        newNetIncome: prevNextCycle?.newNetIncome ?? 0,
+        previousMonthCarryOver: roundMoney(carryAmount),
+        totalAvailableCash: roundMoney((prevNextCycle?.newNetIncome ?? 0) + carryAmount),
+        mandatoryGoalAmount: prevNextCycle?.mandatoryGoalAmount ?? 0,
+        housingTotal: prevNextCycle?.housingTotal ?? 0,
+        essentialFixedTotal: prevNextCycle?.essentialFixedTotal ?? 0,
+        cancelableFixedTotal: prevNextCycle?.cancelableFixedTotal ?? 0,
+        installmentsTotal: prevNextCycle?.installmentsTotal ?? 0,
+        groceriesBudget: prevNextCycle?.groceriesBudget ?? v23Preferences.defaultGroceriesBudget,
+        routineBudget: prevNextCycle?.routineBudget ?? v23Preferences.defaultRoutineBudget,
+        unexpectedBufferLimit:
+          prevNextCycle?.unexpectedBufferLimit ?? v23Preferences.defaultBufferLimit,
+        unexpectedBufferSpent: prevNextCycle?.unexpectedBufferSpent ?? 0,
+        unlockedAllowanceA: prevNextCycle?.unlockedAllowanceA ?? householdConfig.allowanceFloor,
+        unlockedAllowanceB: prevNextCycle?.unlockedAllowanceB ?? householdConfig.allowanceFloor,
+        boostTransfers: prevNextCycle?.boostTransfers ?? [],
+        closingSurplus: prevNextCycle?.closingSurplus ?? 0,
+        surplusRouting: prevNextCycle?.surplusRouting ?? 'carry_over',
+      };
+
+      const uid = currentUser?.uid || 'local-user';
+      const todayIso = new Date().toISOString().slice(0, 10);
+      const createdContribs: GoalContribution[] = [];
+      let updatedGoals = v23Goals;
+
+      if (routing === 'goals' && closingSurplus > 0 && v23Goals.length > 0) {
+        const allocation = calculateMandatoryGoalAllocation({
+          newNetIncome: closingSurplus,
+          mandatoryGoalRate: 1,
+          goals: v23Goals,
+          goalAllocationRules: householdConfig.goalAllocationRules,
+        });
+        const deltaMap = new Map<string, number>();
+        for (const item of allocation.mandatoryGoalBreakdown) {
+          if (item.amount > 0) {
+            deltaMap.set(item.goalId, item.amount);
+            createdContribs.push({
+              id: `surplus_${Date.now()}_${item.goalId}`,
+              goalId: item.goalId,
+              amount: item.amount,
+              source: 'cycle_surplus',
+              contributorUid: uid,
+              date: todayIso,
+              cycleId: activeCycleId,
+            });
+          }
+        }
+        updatedGoals = v23Goals.map((g) => {
+          const added = deltaMap.get(g.id || '') || 0;
+          return added > 0
+            ? { ...g, currentAmount: roundMoney((g.currentAmount || 0) + added) }
+            : g;
+        });
+      }
+
+      setV23LocalStore((prev) => ({
+        ...prev,
+        budgetCycles: {
+          ...(prev.budgetCycles || {}),
+          [activeCycleId]: currentCycle,
+          [nextCycleId]: nextCycleBase,
+        },
+        goals: updatedGoals,
+        goalContributions: [...createdContribs, ...(prev.goalContributions || [])],
+      }));
+
+      if (isV23CloudActive && coupleAccount?.id) {
+        await closeCycleAndRouteSurplusRemote(db, {
+          householdId: coupleAccount.id,
+          cycleId: activeCycleId,
+          nextCycleId,
+          currentCycle,
+          nextCycleBase,
+          routing,
+          goals: updatedGoals,
+          goalContributions: createdContribs.map(({ id: _id, ...rest }) => rest),
+        });
+      }
+      triggerCelebration();
+    },
+    [
+      activeCycleId,
+      activeWorkspaceEval.waterfall.closingLedgers.closingSurplus,
+      activeWorkspaceEval.cycleRecord,
+      budgetCyclesMap,
+      v23Preferences.defaultGroceriesBudget,
+      v23Preferences.defaultRoutineBudget,
+      v23Preferences.defaultBufferLimit,
+      householdConfig.allowanceFloor,
+      householdConfig.goalAllocationRules,
+      currentUser?.uid,
+      v23Goals,
+      isV23CloudActive,
+      coupleAccount?.id,
+    ]
+  );
 
   const updateAlertRule = (ruleOrId: string | SpendingAlertRule, updates?: Partial<SpendingAlertRule>) => {
     if (typeof ruleOrId === 'object') {
@@ -7237,6 +8373,32 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
         v23MedicalShifts,
         v23ExistingHashes,
         confirmCsvTriage,
+        activeCycleId,
+        activeWave,
+        v23Preferences,
+        budgetCyclesMap,
+        activeBudgetCycle: activeWorkspaceEval.cycleRecord,
+        v23Transactions,
+        v23SharedAllowanceExpenses,
+        myAllowanceExpenses,
+        myAllowanceWallet: activeWorkspaceEval.waterfall.closingLedgers.walletA.walletRecord,
+        v23InstallmentPlans,
+        v23Goals,
+        v23GoalContributions,
+        waterfallResult: activeWorkspaceEval.waterfall,
+        shieldMetrics: activeWorkspaceEval.shield,
+        investmentRouting: activeWorkspaceEval.investmentRouting,
+        bucketBreakdown: activeWorkspaceEval.bucketBreakdown,
+        dualLedgerHistory6M,
+        saveHouseholdConfig,
+        updateV23Preferences,
+        simulateInstallment,
+        addCascadeTransaction,
+        reclassifyTransactionBucket,
+        sendAllowanceBoost,
+        sweepAllowanceToGoals,
+        toggleAllowanceWave,
+        closeCycleAndRouteSurplus,
       }}
     >
       {isHydratingCloud ? <main className="min-h-screen flex items-center justify-center p-6 bg-stone-50"><section className="max-w-md text-center" role="status" aria-live="polite"><h1 className="text-xl font-semibold text-stone-900">{cloudLoadError ? 'Vamos recuperar sua conexão' : 'Abrindo o plano de vocês'}</h1><p className="mt-3 text-stone-600">{cloudLoadError || 'Carregando os registros desta conta com segurança.'}</p>{cloudLoadError && <button className="mt-5 rounded-xl bg-emerald-800 px-5 py-3 text-white" onClick={() => window.dispatchEvent(new Event('junto-membership-changed'))}>Tentar novamente</button>}<button className="mt-5 ml-3 px-4 py-3 text-stone-600" onClick={() => void signOutUser()}>Sair</button></section></main> : children}

@@ -130,7 +130,7 @@ function ScreenFallback() {
 // Títulos por tela: melhora a orientação no PWA, no histórico e em leitores de tela
 const SCREEN_TITLES: Record<ScreenId, string> = {
   home: 'Início',
-  couple_hub: 'Hub do Casal',
+  couple_hub: 'Mesada',
   calendar: 'Calendário',
   categories: 'Categorias',
   transactions: 'Transações',
